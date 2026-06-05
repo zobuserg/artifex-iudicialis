@@ -1,0 +1,54 @@
+# Entornos y dependencias
+.venv/
+.venv_pdf/
+venv/
+__pycache__/
+*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+# DATOS SENSIBLES DEL CASO — NUNCA subir
+01_raw/
+02_wiki/
+03_outputs/
+# Claves y secretos
+.env
+# Estado de herramientas / SO
+.openclaw/
+.obsidian/
+.DS_Store
+.vscode/
+.cursor/
+# Documentos sueltos de datos en la raíz
+*.doc
+*.docx
+*.pdf
+
+# ── Protecciones extra conservadas del .gitignore previo (seguridad — no quitar) ──
+.env.local
+*.pem
+.claude/
+.cursorrules
+.idea/
+# Carpeta de documentos de prueba ficticios creada en esta sesión
+_documentos_prueba/
+# Backup del .env original (contiene una clave que no debe versionarse)
+.env.original_backup
+# Logs de arranque generados en esta sesión
+_startup_stderr.log
+_startup_stdout.log
+# Notas sueltas .md en la raíz (posibles notas del vault) — solo se versiona README.md
+*.md
+!README.md
+# Log de ingesta del corpus (puede contener nombres de expedientes reales)
+scripts/_last_corpus_ingest.log
+# Archivos de vault Obsidian sueltos (posible contenido del juez)
+*.canvas
+*.base
+# Clutter de macOS irrelevante en Windows
+Adiutor Iudicis.app/
+WikiJuez.app/
+Alias de Adiutor Iudicis
+WikiJuez.command
+macos/
+*.code-workspace
