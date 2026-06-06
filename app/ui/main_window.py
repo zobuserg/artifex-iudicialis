@@ -132,6 +132,7 @@ from app.core.env_load import set_repo_env_var
 from app.core.output_validator import ValidationReport, validate_resolution_output
 from app.core.pdf_extract import probe_pdf_readability
 from app.ui.juris_quick_note_dialog import JurisQuickNoteDialog, open_edit_bibliografia_note
+from app.ui.artifex_page import ArtifexPage
 from app.ui.theme import build_global_stylesheet, get_app_theme
 
 # ─── Tema (env ADIUTOR_THEME: soft | light | dark) ─────────────────────────
@@ -6072,6 +6073,11 @@ class MainWindow(QMainWindow):
         self._consulta_btn.clicked.connect(lambda: self._switch_page(4))
         sb_vbox.addWidget(self._consulta_btn)
 
+        # Fábrica Artifex — nivel superior (siempre visible)
+        self._artifex_btn = NavButton("🏭", "Fábrica")
+        self._artifex_btn.clicked.connect(lambda: self._switch_page(5))
+        sb_vbox.addWidget(self._artifex_btn)
+
         mat_lbl = QLabel("MATERIA DEL CASO")
         mat_lbl.setStyleSheet(
             f"color: {MUTED}; font-size: 9px; font-weight: 700; letter-spacing: 2px;"
@@ -6195,7 +6201,9 @@ class MainWindow(QMainWindow):
         )
         self._page_consulta = WikiConsultaPage()
 
-        for page in (self._page_caso, self._page_res, self._page_pla, self._page_bib, self._page_consulta):
+        self._page_artifex = ArtifexPage()
+
+        for page in (self._page_caso, self._page_res, self._page_pla, self._page_bib, self._page_consulta, self._page_artifex):
             self._stack.addWidget(page)
 
         # Barra lateral + contenido: el usuario puede ampliar la columna izquierda arrastrando.

@@ -267,8 +267,8 @@ def _default_style(doc: Document) -> None:
 def _build_header(doc: Document, meta: dict, *, skip_corte_sala: bool = False) -> None:
     """
     Replica exacta de la cabecera del expediente real:
-      párrafo vacío
-      CORTE  (CENTER, bold)  — omitido si skip_corte_sala (ya van en cabecera gráfica 1ª pág.)
+      PODER JUDICIAL  (CENTER, bold)           — siempre
+      CORTE  (CENTER, bold)
       SALA   (CENTER, bold)
       párrafo vacío (bold, justify)
       párrafo vacío
@@ -278,25 +278,24 @@ def _build_header(doc: Document, meta: dict, *, skip_corte_sala: bool = False) -
       AGRAVIADO     → valor  (JUSTIFY, bold, tab)
       PROCEDENCIA   → valor  (JUSTIFY, bold, tab)
       separador
-      AUTO DE VISTA  (CENTER, bold, underline)
     """
     corte = meta.get("corte", "CORTE SUPERIOR DE JUSTICIA DE ICA")
     sala  = meta.get("sala",  "SALA PENAL DE APELACIONES DE CHINCHA Y PISCO")
 
-    # Párrafo vacío inicial
-    p0 = doc.add_paragraph()
-    _fmt(p0)
+    # PODER JUDICIAL — siempre va en el cuerpo del documento (igual que el original)
+    p_pj = doc.add_paragraph()
+    _fmt(p_pj, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _run(p_pj, "PODER JUDICIAL", bold=True)
 
-    if not skip_corte_sala:
-        # Corte
-        p1 = doc.add_paragraph()
-        _fmt(p1, align=WD_ALIGN_PARAGRAPH.CENTER)
-        _run(p1, corte, bold=True)
+    # Corte y Sala — siempre en el cuerpo (aunque skip_corte_sala, el texto va aquí;
+    # el banner solo agrega el logo gráfico, no reemplaza el texto)
+    p1 = doc.add_paragraph()
+    _fmt(p1, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _run(p1, corte, bold=True)
 
-        # Sala
-        p2 = doc.add_paragraph()
-        _fmt(p2, align=WD_ALIGN_PARAGRAPH.CENTER)
-        _run(p2, sala, bold=True)
+    p2 = doc.add_paragraph()
+    _fmt(p2, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _run(p2, sala, bold=True)
 
     # Párrafo vacío bold justify (igual al doc original [003])
     p3 = doc.add_paragraph()
@@ -459,9 +458,36 @@ def _parse_lines(doc: Document, lines: list[str]) -> None:
     for raw in lines:
         line = raw.rstrip()
 
-        # Filtrar metadatos internos del .md
+        # Filtrar metadatos internos del .md y notas del modelo
         stripped = line.strip()
         if stripped.startswith("<!--") or stripped.startswith("---"):
+            continue
+        # Filtrar líneas de metadata del modelo ("Archivo sugerido:", etc.)
+        _bare = stripped.lstrip("*_`").lower()
+        if _bare.startswith("archivo sugerido") or _bare.startswith("nombre sugerido"):
+            continue
+
+        # Filtrar encabezado institucional duplicado
+        # (_build_header ya lo agrega automáticamente; si Claude lo repite, lo saltamos)
+        _bare_up = stripped.upper().lstrip("*_` ")
+        if _bare_up in ("PODER JUDICIAL",):
+            continue
+        if re.match(r"^CORTE SUPERIOR\b", _bare_up):
+            continue
+        if re.match(r"^SALA\s+(PENAL|SUPERIOR|DE APELACIONES|LIQUIDADORA)\b", _bare_up):
+            continue
+        # Bloque de metadatos estilo tabla: EXPEDIENTE Nº : ... / IMPUTADO : ... / etc.
+        if re.match(
+            r"^(EXPEDIENTE\s+N[ºoO°]|IMPUTADO|DELITO\b|AGRAVIADO|PROCEDENCIA)\b.*:\s*\S",
+            _bare_up,
+        ):
+            continue
+        # Mini-cabecera que Claude escribe antes del AUTO DE VISTA (borrador antiguo)
+        # EXPEDIENTE: / RESOLUCIÓN IMPUGNADA: / RECURRENTE: / MATERIA:
+        if re.match(
+            r"^(EXPEDIENTE|RESOLUCI[OÓ]N\s+IMPUGNADA|RECURRENTE|MATERIA)\s*:",
+            _bare_up,
+        ):
             continue
 
         # Línea vacía

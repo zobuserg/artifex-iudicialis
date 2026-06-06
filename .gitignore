@@ -52,3 +52,10 @@ Alias de Adiutor Iudicis
 WikiJuez.command
 macos/
 *.code-workspace
+
+# Outputs generados por la app (resoluciones, .docx, estado del grafo)
+outputs/
+artifex_state.db
+
+# Scripts de prueba locales (no son parte de la app)
+test_cadena_*.py
