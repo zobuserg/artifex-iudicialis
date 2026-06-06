@@ -1,14 +1,28 @@
-# Amanuensis — dependencias de ejecución
+# Artifex Iudicialis — dependencias de ejecución
 # Instalar desde la raíz del repo:  pip install -r app/requirements.txt
 
+# ── UI ──
 PyQt6>=6.7.0
+
+# ── PDF / OCR / Word ──
 pdfplumber>=0.11.0
 pymupdf>=1.24.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
 python-docx>=1.0.0
 reportlab>=4.0.0
-# Cliente HTTP para `app/core/claude_worker.py` (Ollama local); opcional si solo usas prompts en Cursor
-ollama>=0.4.0
-# Generación con API de Anthropic (`ClaudeWorker`)
+
+# ── Motor LangGraph (pipeline de la fábrica) ──
+langgraph>=1.2.0
+langgraph-checkpoint>=4.1.0
+langgraph-checkpoint-sqlite>=3.1.0
+pydantic>=2.10.0
+
+# ── API de Anthropic (Claude) ──
 anthropic>=0.40.0
+
+# ── Boletines en vivo (Tavily, opcional pero recomendado) ──
+tavily-python>=0.7.0
+
+# ── Legado (mantener por compatibilidad con main_window.py viejo) ──
+ollama>=0.4.0
