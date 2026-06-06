@@ -4,7 +4,7 @@ fabrica.py — Interfaz completa de la Fábrica de Resoluciones (Artifex Iudicia
 Diseño basado en el mockup del artefacto: estilo papel cálido, stepper dorado,
 pantallas apiladas. Incorpora todas las funciones del plan:
 
-  Pantalla 0 · El caso   — documentos, materia, postura, toggle "en vivo"
+  Pantalla 0 · El caso   — materia, caso (slot-based), datos, postura
   Pantalla 1 · ★ Hechos  — resumen editable (checkpoint ①)
   Pantalla 2 · ★ Fuentes — fundamentos con checkboxes RAG/en-vivo (checkpoint ②)
   Pantalla 3 · ★ Borrador — texto + "Reescribir selección" + "Pulir" (checkpoint ③)
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -47,6 +48,7 @@ from app.core.env_load import load_repo_dotenv
 from app.core.file_manager import (
     BASE_DIR,
     MATERIA_LABELS,
+    MATERIA_SLUGS,
     list_case_folders,
     materia_label,
     read_fuentes_slots,
@@ -55,10 +57,6 @@ from app.core.file_manager import (
 )
 
 load_repo_dotenv()
-
-# Listas ordenadas para el combo de materia (orden del dict en Python 3.7+)
-_MATERIA_SLUGS_LIST:  list[str] = list(MATERIA_LABELS.keys())
-_MATERIA_LABELS_LIST: list[str] = list(MATERIA_LABELS.values())
 
 # ── Paleta de colores (papel cálido, del mockup) ──────────────────────────────
 
@@ -169,6 +167,18 @@ _BTN_SAGE = f"""
     QPushButton:hover {{ background: #5a8a62; }}
     QPushButton:disabled {{ background: {_C['hair']}; color: {_C['faint']}; }}
 """
+_BTN_SMALL_GHOST = f"""
+    QPushButton {{
+        background: transparent;
+        color: {_C['ink2']};
+        border: 1px solid {_C['hair']};
+        border-radius: 8px;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QPushButton:hover {{ background: {_C['card']}; }}
+"""
 _INPUT_SS = f"""
     QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{
         background: {_C['card']};
@@ -223,6 +233,16 @@ def _scroll(inner: QWidget) -> QScrollArea:
     sa.setWidget(inner)
     sa.setStyleSheet(f"QScrollArea {{ border: none; background: {_C['paper']}; }}")
     return sa
+
+
+def _section_label(text: str) -> QLabel:
+    """Etiqueta de sección con estilo teal."""
+    w = QLabel(text)
+    w.setStyleSheet(
+        f"color: {_C['teal_d']}; font-size: 13px; font-weight: 700; "
+        f"padding-top: 6px;"
+    )
+    return w
 
 
 # ── Workers ───────────────────────────────────────────────────────────────────
@@ -318,7 +338,7 @@ class _RewriteWorker(QThread):
                 "INSTRUCCIÓN DEL JUEZ:\n"
                 f"{self._instruccion}\n\n"
                 "BORRADOR COMPLETO (solo para contexto — no lo reproduzcas):\n"
-                f"{self._borrador[:8000]}\n\n"  # limitar contexto
+                f"{self._borrador[:8000]}\n\n"
                 "FRAGMENTO A REESCRIBIR:\n"
                 f"{self._fragmento}\n\n"
                 "Devuelve ÚNICAMENTE el fragmento reescrito siguiendo la instrucción. "
@@ -334,141 +354,186 @@ class _RewriteWorker(QThread):
             self.error.emit(str(exc))
 
 
-# ── Pantalla 0: El caso ───────────────────────────────────────────────────────
+# ── Pantalla 0: El caso (slot-based workflow) ─────────────────────────────────
 
 class _SetupScreen(QWidget):
-    """Pantalla 0 — el juez carga el expediente y configura el caso."""
+    """Pantalla 0 — el juez selecciona la carpeta del caso y configura el expediente."""
 
-    iniciar = pyqtSignal(dict)   # emite config_dict cuando pulsa Iniciar
+    iniciar         = pyqtSignal(dict)   # config dict cuando pulsa Iniciar
+    cargar_borrador = pyqtSignal(str)    # path .md cuando pulsa Cargar borrador
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background: {_C['paper']};")
-        self._files: list[Path] = []
         self._live_web = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 28)
-        root.setSpacing(18)
+        root.setSpacing(0)
 
         # Título
         t = _lbl("Preparar el caso", bold=True, size=24)
         t.setStyleSheet(f"color: {_C['ink']}; font-size: 24px; font-weight: 700;")
         root.addWidget(t)
+        root.addSpacing(6)
         root.addWidget(_lbl(
-            "Cargue los documentos del expediente, elija la materia y su postura. "
-            "Al pulsar Iniciar, la fábrica se pone en marcha.",
+            "Seleccione el tipo de caso y la carpeta del expediente. "
+            "La fábrica leerá automáticamente los documentos organizados en sus ranuras.",
             color=_C["ink2"], size=13,
         ))
+        root.addSpacing(20)
 
-        # ① Documentos
-        root.addWidget(_lbl("① Documentos del expediente", bold=True, size=14, color=_C["teal_d"]))
-        self._drop_lbl = _lbl(
-            "Haz clic para seleccionar archivos — PDF o Word. "
-            "Lo habitual: 7-10 documentos del expediente.",
-            color=_C["ink2"],
-        )
-        drop_btn = QPushButton("📂  Agregar documentos")
-        drop_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {_C['card']}; color: {_C['teal_d']};
-                border: 2px dashed {_C['hair']}; border-radius: 12px;
-                padding: 18px; font-size: 13px; font-weight: 600;
-            }}
-            QPushButton:hover {{ border-color: {_C['teal']}; background: {_C['teal_s']}; }}
-        """)
-        drop_btn.clicked.connect(self._pick_files)
-        root.addWidget(drop_btn)
-        self._files_lbl = _lbl("Ningún archivo cargado.", color=_C["faint"], size=12)
-        root.addWidget(self._files_lbl)
+        # Layout de dos columnas
+        cols = QWidget()
+        cols_lay = QHBoxLayout(cols)
+        cols_lay.setContentsMargins(0, 0, 0, 0)
+        cols_lay.setSpacing(20)
 
-        # ② Tipo de caso
-        root.addWidget(_lbl("② Tipo de caso (materia)", bold=True, size=14, color=_C["teal_d"]))
-        self._materia_cb = QComboBox()
-        self._materia_cb.addItems(_MATERIA_LABELS_LIST)
-        self._materia_cb.setStyleSheet(_INPUT_SS + f"QComboBox {{ padding: 10px 14px; }}")
-        root.addWidget(self._materia_cb)
+        # ── Columna izquierda ──
+        left = QWidget()
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(14)
+
+        # ① Tipo de caso (materia)
+        left_lay.addWidget(_section_label("① Tipo de caso"))
+        self._cmb_materia = QComboBox()
+        self._cmb_materia.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
+        _default_idx = 0
+        for i, slug in enumerate(sorted(MATERIA_SLUGS)):
+            label = MATERIA_LABELS.get(slug, slug)
+            self._cmb_materia.addItem(label, userData=slug)
+            if slug == "prision_preventiva":
+                _default_idx = i
+        self._cmb_materia.setCurrentIndex(_default_idx)
+        self._cmb_materia.currentIndexChanged.connect(self._on_materia_changed)
+        left_lay.addWidget(self._cmb_materia)
+
+        # ② Caso (carpeta)
+        caso_header = QWidget()
+        caso_h_lay = QHBoxLayout(caso_header)
+        caso_h_lay.setContentsMargins(0, 0, 0, 0)
+        caso_h_lay.setSpacing(8)
+        caso_h_lay.addWidget(_section_label("② Caso"))
+        caso_h_lay.addStretch()
+        self._btn_refresh = QPushButton("↻")
+        self._btn_refresh.setToolTip("Actualizar lista de casos")
+        self._btn_refresh.setStyleSheet(_BTN_SMALL_GHOST)
+        self._btn_refresh.setFixedWidth(36)
+        self._btn_refresh.clicked.connect(self._refresh_casos)
+        caso_h_lay.addWidget(self._btn_refresh)
+        left_lay.addWidget(caso_header)
+
+        self._cmb_caso = QComboBox()
+        self._cmb_caso.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
+        left_lay.addWidget(self._cmb_caso)
+        self._caso_hint = _lbl("Seleccione el expediente de la lista.", color=_C["faint"], size=11)
+        left_lay.addWidget(self._caso_hint)
 
         # ③ Datos del expediente
-        root.addWidget(_lbl("③ Datos del expediente", bold=True, size=14, color=_C["teal_d"]))
-        grid = QWidget()
-        gl = QHBoxLayout(grid)
-        gl.setContentsMargins(0, 0, 0, 0)
-        gl.setSpacing(12)
+        left_lay.addWidget(_section_label("③ Datos del expediente"))
+        grid_w = QWidget()
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(10)
 
-        def _inp(ph):
+        def _inp(ph: str) -> QLineEdit:
             w = QLineEdit()
             w.setPlaceholderText(ph)
             w.setStyleSheet(_INPUT_SS)
             return w
 
-        self._exp   = _inp("Expediente Nº")
-        self._imp   = _inp("Imputado(s)")
-        self._del   = _inp("Delito imputado")
-        self._agr   = _inp("Agraviado")
-        gl.addWidget(self._exp)
-        gl.addWidget(self._imp)
-        root.addWidget(grid)
+        self._exp = _inp("Expediente Nº")
+        self._imp = _inp("Imputado(s)")
+        self._del = _inp("Delito imputado")
+        self._agr = _inp("Agraviado")
+        self._juz = _inp("Juzgado de origen")
 
-        grid2 = QWidget()
-        gl2 = QHBoxLayout(grid2)
-        gl2.setContentsMargins(0, 0, 0, 0)
-        gl2.setSpacing(12)
-        gl2.addWidget(self._del)
-        gl2.addWidget(self._agr)
-        root.addWidget(grid2)
+        grid.addWidget(self._exp, 0, 0)
+        grid.addWidget(self._imp, 0, 1)
+        grid.addWidget(self._del, 1, 0)
+        grid.addWidget(self._agr, 1, 1)
+        grid.addWidget(self._juz, 2, 0, 1, 2)
+
+        left_lay.addWidget(grid_w)
 
         # ④ Postura
-        root.addWidget(_lbl("④ Postura / decisión", bold=True, size=14, color=_C["teal_d"]))
-        self._postura_cb = QComboBox()
-        self._postura_cb.addItems([
-            "Confirmar (declarar infundado)",
-            "Revocar (declarar fundado / conceder apelación)",
-            "Revocar parcialmente",
-            "Libre (sin postura fija)",
-        ])
-        self._postura_cb.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
-        root.addWidget(self._postura_cb)
+        left_lay.addWidget(_section_label("④ Postura"))
+        self._cmb_postura = QComboBox()
+        self._cmb_postura.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
+        self._cmb_postura.addItem("CONFIRMAR",            userData="confirmar")
+        self._cmb_postura.addItem("REVOCAR",              userData="revocar")
+        self._cmb_postura.addItem("REVOCAR PARCIALMENTE", userData="revocar_parcial")
+        left_lay.addWidget(self._cmb_postura)
 
-        # ⑤ Fuentes
-        root.addWidget(_lbl("⑤ Fuentes de consulta", bold=True, size=14, color=_C["teal_d"]))
-        src_row = QWidget()
-        src_lay = QVBoxLayout(src_row)
-        src_lay.setContentsMargins(0, 0, 0, 0)
-        src_lay.setSpacing(8)
+        # ⑤ Instrucción particular
+        left_lay.addWidget(_section_label("⑤ Instrucción particular (opcional)"))
+        self._instruccion = QPlainTextEdit()
+        self._instruccion.setPlaceholderText("Notas del juez para este caso…")
+        self._instruccion.setStyleSheet(_INPUT_SS + "QPlainTextEdit { min-height: 70px; max-height: 100px; }")
+        self._instruccion.setMaximumHeight(100)
+        left_lay.addWidget(self._instruccion)
+
+        left_lay.addStretch()
+        cols_lay.addWidget(left, 3)
+
+        # ── Columna derecha (fuentes) ──
+        right = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(14)
+
+        right_lay.addWidget(_section_label("Fuentes de consulta"))
 
         rag_row = self._make_toggle_row(
-            "📚  Tu biblioteca jurídica",
+            "📚  Biblioteca jurídica",
             "Códigos, jurisprudencia y resoluciones previas — siempre activo.",
-            enabled=True, locked=True,
+            locked=True,
         )
-        src_lay.addWidget(rag_row)
+        right_lay.addWidget(rag_row)
 
         self._live_btn, live_row = self._make_toggle_row_with_btn(
             "🌐  Boletines oficiales en vivo",
             "Busca en LP Derecho, SPIJ, Gaceta Jurídica publicaciones recientes (Tavily).",
         )
-        src_lay.addWidget(live_row)
-        root.addWidget(src_row)
+        right_lay.addWidget(live_row)
+
+        right_lay.addStretch()
+        cols_lay.addWidget(right, 2)
+
+        root.addWidget(cols)
+        root.addSpacing(24)
 
         # Botones
-        root.addItem(__import__("PyQt6.QtWidgets", fromlist=["QSpacerItem"]).QSpacerItem(
-            0, 10, __import__("PyQt6.QtWidgets", fromlist=["QSizePolicy"]).QSizePolicy.Policy.Minimum,
-            __import__("PyQt6.QtWidgets", fromlist=["QSizePolicy"]).QSizePolicy.Policy.Expanding,
-        ))
         btn_row = QWidget()
         br = QHBoxLayout(btn_row)
         br.setContentsMargins(0, 0, 0, 0)
+        br.setSpacing(12)
+
+        self._btn_borrador = QPushButton("📂  Cargar borrador .md")
+        self._btn_borrador.setStyleSheet(_BTN_GHOST)
+        self._btn_borrador.clicked.connect(self._on_cargar_borrador)
+        br.addWidget(self._btn_borrador)
+
         br.addStretch()
+
         self._btn_iniciar = QPushButton("Iniciar la fábrica  →")
         self._btn_iniciar.setStyleSheet(_BTN_PRIMARY)
         self._btn_iniciar.clicked.connect(self._on_iniciar)
         br.addWidget(self._btn_iniciar)
+
         root.addWidget(btn_row)
 
-    def _make_toggle_row(self, title, desc, enabled=True, locked=False):
+        # Poblar casos para la materia por defecto
+        self._refresh_casos()
+
+    # ── Helpers de UI ────────────────────────────────────────────────────
+
+    def _make_toggle_row(self, title: str, desc: str, locked: bool = False) -> QWidget:
         row = QWidget()
-        row.setStyleSheet(f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;")
+        row.setStyleSheet(
+            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
+        )
         rl = QHBoxLayout(row)
         rl.setContentsMargins(16, 12, 16, 12)
         txt = QWidget()
@@ -480,12 +545,17 @@ class _SetupScreen(QWidget):
         rl.addWidget(txt, 1)
         if locked:
             badge = _lbl("✓ activo", color=_C["sage"], size=11, bold=True)
+            badge.setStyleSheet(
+                f"color: {_C['sage']}; font-size: 11px; font-weight: 700;"
+            )
             rl.addWidget(badge)
         return row
 
-    def _make_toggle_row_with_btn(self, title, desc):
+    def _make_toggle_row_with_btn(self, title: str, desc: str) -> tuple[QPushButton, QWidget]:
         row = QWidget()
-        row.setStyleSheet(f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;")
+        row.setStyleSheet(
+            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
+        )
         rl = QHBoxLayout(row)
         rl.setContentsMargins(16, 12, 16, 12)
         txt = QWidget()
@@ -498,42 +568,68 @@ class _SetupScreen(QWidget):
         btn = QPushButton("Activar")
         btn.setCheckable(True)
         btn.setStyleSheet(f"""
-            QPushButton {{ background: {_C['hair']}; color: {_C['ink2']}; border: none;
-                border-radius: 8px; padding: 6px 14px; font-size: 12px; font-weight: 600; }}
+            QPushButton {{
+                background: {_C['hair']}; color: {_C['ink2']};
+                border: none; border-radius: 8px;
+                padding: 6px 14px; font-size: 12px; font-weight: 600;
+            }}
             QPushButton:checked {{ background: {_C['teal']}; color: #fff; }}
         """)
         btn.toggled.connect(lambda on: setattr(self, "_live_web", on))
         rl.addWidget(btn)
         return btn, row
 
-    def _pick_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Seleccionar documentos del expediente",
-            str(BASE_DIR / "01_raw"),
-            "Documentos (*.pdf *.docx *.doc *.txt)",
+    # ── Lógica ───────────────────────────────────────────────────────────
+
+    def _current_materia_slug(self) -> str:
+        data = self._cmb_materia.currentData()
+        return data if data else "prision_preventiva"
+
+    def _on_materia_changed(self, _idx: int):
+        self._refresh_casos()
+
+    def _refresh_casos(self):
+        materia = self._current_materia_slug()
+        self._cmb_caso.clear()
+        carpetas = list_case_folders(materia)
+        if not carpetas:
+            self._cmb_caso.addItem("— ningún caso encontrado —", userData="")
+            self._caso_hint.setText(
+                f"No hay carpetas caso_* en 01_raw/{materia}/. Créelas primero."
+            )
+            return
+        for p in carpetas:
+            self._cmb_caso.addItem(p.name, userData=str(p))
+        self._caso_hint.setText(
+            f"{len(carpetas)} caso(s) encontrado(s). Seleccione uno."
         )
-        if paths:
-            self._files = [Path(p) for p in paths]
-            names = [p.name for p in self._files]
-            self._files_lbl.setText(f"{len(names)} archivo(s): " + ", ".join(names[:5])
-                                    + (" …" if len(names) > 5 else ""))
-            self._files_lbl.setStyleSheet(f"color: {_C['teal_d']}; font-size: 12px;")
+
+    def _on_cargar_borrador(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Cargar borrador .md",
+            str(BASE_DIR / "03_outputs" / "resoluciones"),
+            "Markdown (*.md);;Todos los archivos (*)",
+        )
+        if path:
+            self.cargar_borrador.emit(path)
 
     def _on_iniciar(self):
-        materia_idx = self._materia_cb.currentIndex()
-        materia = _MATERIA_SLUGS_LIST[materia_idx] if materia_idx < len(_MATERIA_SLUGS_LIST) else "prision_preventiva"
-        postura_map = ["confirmar", "revocar", "revocar_parcial", "personalizado"]
-        postura = postura_map[min(self._postura_cb.currentIndex(), 3)]
+        caso_path = self._cmb_caso.currentData() or ""
+        materia   = self._current_materia_slug()
+        postura   = self._cmb_postura.currentData() or "confirmar"
 
         self.iniciar.emit({
-            "files":      self._files,
-            "materia":    materia,
-            "postura":    postura,
-            "expediente": self._exp.text().strip(),
-            "imputados":  self._imp.text().strip(),
-            "delito":     self._del.text().strip(),
-            "agraviado":  self._agr.text().strip(),
-            "use_live_web": self._live_web,
+            "materia":                materia,
+            "caso_path":              caso_path,
+            "expediente":             self._exp.text().strip(),
+            "imputados":              self._imp.text().strip(),
+            "delito":                 self._del.text().strip(),
+            "agraviado":              self._agr.text().strip(),
+            "juzgado":                self._juz.text().strip(),
+            "postura":                postura,
+            "instruccion_particular": self._instruccion.toPlainText().strip(),
+            "use_live_web":           self._live_web,
         })
 
 
@@ -551,9 +647,11 @@ class _HechosScreen(QWidget):
         root.setSpacing(16)
 
         badge = _lbl("★  Control del juez ①", bold=True, size=12, color=_C["gold_d"])
-        badge.setStyleSheet(f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
-                            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
-                            f"padding: 4px 12px; font-size: 12px; font-weight: 700;")
+        badge.setStyleSheet(
+            f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
+            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
+            f"padding: 4px 12px; font-size: 12px; font-weight: 700;"
+        )
         root.addWidget(badge)
 
         root.addWidget(_lbl("Confirmar los hechos", bold=True, size=22))
@@ -608,9 +706,11 @@ class _FuentesScreen(QWidget):
         root.setSpacing(16)
 
         badge = _lbl("★  Control del juez ②", bold=True, size=12, color=_C["gold_d"])
-        badge.setStyleSheet(f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
-                            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
-                            f"padding: 4px 12px; font-size: 12px; font-weight: 700;")
+        badge.setStyleSheet(
+            f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
+            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
+            f"padding: 4px 12px; font-size: 12px; font-weight: 700;"
+        )
         root.addWidget(badge)
 
         root.addWidget(_lbl("Revisar las fuentes", bold=True, size=22))
@@ -644,16 +744,14 @@ class _FuentesScreen(QWidget):
         root.addWidget(btn_row)
 
     def set_fuentes(self, texto: str):
-        # Limpiar lista anterior
         while self._list_lay.count():
             item = self._list_lay.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._checks.clear()
 
-        # Parsear el texto en ítems (por líneas que empiecen con •, -, *, o sean párrafos)
         lineas = texto.strip().split("\n")
-        items: list[tuple[str, bool]] = []  # (texto, es_live)
+        items: list[tuple[str, bool]] = []
         buf = ""
         for linea in lineas:
             s = linea.strip()
@@ -677,21 +775,22 @@ class _FuentesScreen(QWidget):
             if not text:
                 continue
             row = QWidget()
-            row.setStyleSheet(f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 10px;")
+            row.setStyleSheet(
+                f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 10px;"
+            )
             rl = QHBoxLayout(row)
             rl.setContentsMargins(14, 10, 14, 10)
             rl.setSpacing(12)
 
             cb = QCheckBox()
             cb.setChecked(True)
-            cb.setStyleSheet(f"QCheckBox::indicator {{ width: 20px; height: 20px; }}")
+            cb.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
             rl.addWidget(cb)
 
             txt_w = QWidget()
             tl = QVBoxLayout(txt_w)
             tl.setContentsMargins(0, 0, 0, 0)
             tl.setSpacing(2)
-            # Truncar para display
             display = text[:200] + "…" if len(text) > 200 else text
             tl.addWidget(_lbl(display, size=12))
             rl.addWidget(txt_w, 1)
@@ -700,8 +799,10 @@ class _FuentesScreen(QWidget):
             tag_bg    = _C["teal_s"] if is_live else "#f0e2cc"
             tag_text  = "en vivo" if is_live else "biblioteca · RAG"
             tag = _lbl(f" {tag_text} ", size=10, color=tag_color)
-            tag.setStyleSheet(f"background: {tag_bg}; color: {tag_color}; "
-                              f"border-radius: 5px; padding: 2px 6px; font-size: 10px;")
+            tag.setStyleSheet(
+                f"background: {tag_bg}; color: {tag_color}; "
+                f"border-radius: 5px; padding: 2px 6px; font-size: 10px;"
+            )
             rl.addWidget(tag)
 
             self._list_lay.addWidget(row)
@@ -726,16 +827,17 @@ class _BorradorScreen(QWidget):
         self.setStyleSheet(f"background: {_C['paper']};")
         self._pulir_worker:   _PulirWorker   | None = None
         self._rewrite_worker: _RewriteWorker | None = None
-        self._shortcut_state = None  # CasoState snapshot para _PulirWorker
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 28)
         root.setSpacing(14)
 
         badge = _lbl("★  Control del juez ③", bold=True, size=12, color=_C["gold_d"])
-        badge.setStyleSheet(f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
-                            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
-                            f"padding: 4px 12px; font-size: 12px; font-weight: 700;")
+        badge.setStyleSheet(
+            f"color: {_C['gold_d']}; background: {_C['gold_s']}; "
+            f"border: 1px solid {_C['gold']}; border-radius: 8px; "
+            f"padding: 4px 12px; font-size: 12px; font-weight: 700;"
+        )
         root.addWidget(badge)
 
         root.addWidget(_lbl("Revisar el borrador", bold=True, size=22))
@@ -754,10 +856,11 @@ class _BorradorScreen(QWidget):
         ))
 
         self._editor = QPlainTextEdit()
-        self._editor.setStyleSheet(_INPUT_SS + "QPlainTextEdit { min-height: 260px; font-size: 13px; }")
+        self._editor.setStyleSheet(
+            _INPUT_SS + "QPlainTextEdit { min-height: 260px; font-size: 13px; }"
+        )
         root.addWidget(self._editor, 1)
 
-        # Barra de herramientas del borrador
         tool_row = QWidget()
         tl = QHBoxLayout(tool_row)
         tl.setContentsMargins(0, 0, 0, 0)
@@ -800,12 +903,14 @@ class _BorradorScreen(QWidget):
             self._verif_lbl.setText("✓  Verificación de citas: OK — sin referencias inventadas.")
             self._verif_lbl.setStyleSheet(
                 f"background: {_C['teal_s']}; border: 1px solid {_C['teal']}; "
-                f"border-radius: 9px; padding: 8px 14px; color: {_C['teal_d']}; font-size: 12px;")
+                f"border-radius: 9px; padding: 8px 14px; color: {_C['teal_d']}; font-size: 12px;"
+            )
         elif citas_ok is False:
             self._verif_lbl.setText("⚠  Hay citas con observaciones. Revise el borrador.")
             self._verif_lbl.setStyleSheet(
                 f"background: #fdf0e4; border: 1px solid {_C['kraft']}; "
-                f"border-radius: 9px; padding: 8px 14px; color: {_C['kraft']}; font-size: 12px;")
+                f"border-radius: 9px; padding: 8px 14px; color: {_C['kraft']}; font-size: 12px;"
+            )
         else:
             self._verif_lbl.setText("ℹ  Borrador listo para revisión.")
         n_avisos = len([a for a in (avisos or []) if "[E4]" in a])
@@ -847,7 +952,6 @@ class _BorradorScreen(QWidget):
         if cursor.hasSelection():
             cursor.insertText(nuevo)
         else:
-            # Si ya no hay selección activa, insertar al final
             cursor.movePosition(QTextCursor.MoveOperation.End)
             cursor.insertText("\n\n[REESCRITURA]:\n" + nuevo)
         self._btn_rewrite.setEnabled(True)
@@ -904,9 +1008,11 @@ class _FinalScreen(QWidget):
         root.setSpacing(16)
 
         badge = _lbl("✓  Resolución lista", bold=True, size=12, color=_C["sage"])
-        badge.setStyleSheet(f"color: {_C['sage']}; background: #eaf5ed; "
-                            f"border: 1px solid {_C['sage']}; border-radius: 8px; "
-                            f"padding: 4px 12px; font-size: 12px; font-weight: 700;")
+        badge.setStyleSheet(
+            f"color: {_C['sage']}; background: #eaf5ed; "
+            f"border: 1px solid {_C['sage']}; border-radius: 8px; "
+            f"padding: 4px 12px; font-size: 12px; font-weight: 700;"
+        )
         root.addWidget(badge)
 
         root.addWidget(_lbl("Resolución final", bold=True, size=22))
@@ -929,7 +1035,9 @@ class _FinalScreen(QWidget):
 
         header_lbl = _lbl("⚖  PODER JUDICIAL", bold=True, size=16, color=_C["gold_d"])
         header_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_lbl.setStyleSheet(f"color: {_C['gold_d']}; font-size: 16px; font-weight: 700;")
+        header_lbl.setStyleSheet(
+            f"color: {_C['gold_d']}; font-size: 16px; font-weight: 700;"
+        )
         pl.addWidget(header_lbl)
 
         self._exp_lbl = _lbl("", color=_C["ink2"], size=12)
@@ -989,7 +1097,9 @@ class _FinalScreen(QWidget):
 
     def _abrir_carpeta(self):
         if self._docx_path:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self._docx_path).parent)))
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(Path(self._docx_path).parent))
+            )
 
 
 # ── Ventana principal de la Fábrica ──────────────────────────────────────────
@@ -1001,12 +1111,13 @@ class FabricaWidget(QWidget):
         super().__init__(parent)
         self.setStyleSheet(f"background: {_C['paper']};")
 
-        self._graph      = None
-        self._graph_conn = None
-        self._thread_id  = None
+        self._graph          = None
+        self._graph_conn     = None
+        self._thread_id      = None
         self._worker: _ArtifexWorker | None = None
         self._current_cfg: dict = {}
-        self._expediente = ""
+        self._expediente     = ""
+        self._shortcut_state = None   # CasoState snapshot para modo "cargar borrador"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1014,7 +1125,9 @@ class FabricaWidget(QWidget):
 
         # ── Top bar ──
         top = QWidget()
-        top.setStyleSheet(f"background: {_C['panel2']}; border-bottom: 1px solid {_C['hair']};")
+        top.setStyleSheet(
+            f"background: {_C['panel2']}; border-bottom: 1px solid {_C['hair']};"
+        )
         top_lay = QHBoxLayout(top)
         top_lay.setContentsMargins(22, 12, 22, 12)
 
@@ -1030,7 +1143,9 @@ class FabricaWidget(QWidget):
 
         # ── Stepper ──
         stepper = QWidget()
-        stepper.setStyleSheet(f"background: {_C['panel2']}; border-bottom: 1px solid {_C['hair']};")
+        stepper.setStyleSheet(
+            f"background: {_C['panel2']}; border-bottom: 1px solid {_C['hair']};"
+        )
         sl = QHBoxLayout(stepper)
         sl.setContentsMargins(16, 10, 16, 10)
         sl.setSpacing(8)
@@ -1043,7 +1158,7 @@ class FabricaWidget(QWidget):
             ("★", "Borrador ③", True),
             ("✓", "Resolución", False),
         ]
-        for num, label, is_chk in step_defs:
+        for num, label, _is_chk in step_defs:
             btn = QPushButton(f"  {num}  {label}")
             btn.setStyleSheet(_STEP_BASE)
             btn.setCheckable(False)
@@ -1057,11 +1172,11 @@ class FabricaWidget(QWidget):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background: {_C['paper']};")
 
-        self._setup   = _SetupScreen()
-        self._hechos  = _HechosScreen()
-        self._fuentes = _FuentesScreen()
-        self._borrador= _BorradorScreen()
-        self._final   = _FinalScreen()
+        self._setup    = _SetupScreen()
+        self._hechos   = _HechosScreen()
+        self._fuentes  = _FuentesScreen()
+        self._borrador = _BorradorScreen()
+        self._final    = _FinalScreen()
 
         for s in (self._setup, self._hechos, self._fuentes, self._borrador, self._final):
             wrap = _scroll(s)
@@ -1071,6 +1186,7 @@ class FabricaWidget(QWidget):
 
         # ── Señales ──
         self._setup.iniciar.connect(self._on_iniciar)
+        self._setup.cargar_borrador.connect(self._on_cargar_borrador)
         self._hechos.confirmar.connect(self._on_hechos_confirmados)
         self._hechos.volver.connect(lambda: self._go(0))
         self._fuentes.aprobar.connect(self._on_fuentes_aprobadas)
@@ -1104,13 +1220,18 @@ class FabricaWidget(QWidget):
         from app.core.env_load import load_repo_dotenv
         load_repo_dotenv()
 
-        files = cfg.get("files", [])
-        materia = cfg.get("materia", "prision_preventiva")
-        self._expediente = cfg.get("expediente", "")
+        materia   = cfg["materia"]
+        caso_path = cfg.get("caso_path", "")
+        self._expediente  = cfg.get("expediente", "")
         self._current_cfg = cfg
 
+        if not caso_path:
+            self._set_status("Selecciona un caso antes de iniciar.")
+            return
+
+        caso_folder = Path(caso_path)
         self._set_status("Iniciando fábrica…")
-        self._go(1)  # muestra pantalla hechos mientras carga
+        self._go(1)
         self._hechos.set_texto("⏳  Procesando documentos…")
 
         try:
@@ -1123,44 +1244,30 @@ class FabricaWidget(QWidget):
                 materia_label as ml,
             )
 
-            # Crear carpeta del caso
-            folder_name = f"caso_{uuid.uuid4().hex[:8]}"
-            caso_dir = BASE_DIR / "01_raw" / materia / folder_name
-            caso_dir.mkdir(parents=True, exist_ok=True)
-
-            # Si el usuario seleccionó archivos manualmente, los usamos
-            # Si no, buscamos la carpeta más reciente de esa materia
-            if files:
-                import shutil
-                for f in files:
-                    shutil.copy(str(f), str(caso_dir / f.name))
-                slots = read_fuentes_slots(caso_dir)
-            else:
-                carpetas = list_case_folders(materia)
-                if carpetas:
-                    caso_dir = carpetas[-1]
-                    folder_name = caso_dir.name
-                slots = read_fuentes_slots(caso_dir)
+            slots = read_fuentes_slots(caso_folder)
 
             postura_map = {
-                "confirmar": Postura.CONFIRMAR,
-                "revocar": Postura.REVOCAR,
+                "confirmar":       Postura.CONFIRMAR,
+                "revocar":         Postura.REVOCAR,
                 "revocar_parcial": Postura.REVOCAR_PARCIAL,
-                "personalizado": Postura.PERSONALIZADO,
+                "personalizado":   Postura.PERSONALIZADO,
             }
             postura = postura_map.get(cfg.get("postura", "confirmar"), Postura.CONFIRMAR)
 
             state = CasoState(
                 materia=materia,
                 materia_label=ml(materia),
-                folder_name=folder_name,
+                folder_name=caso_folder.name,
+                caso_num=caso_folder.name.split("_")[1] if "_" in caso_folder.name else "",
                 slots=slots,
                 slot_labels=slot_labels_for(materia),
                 postura=postura,
                 expediente=cfg.get("expediente", ""),
                 imputados=cfg.get("imputados", ""),
-                delito=cfg.get("delito", ""),
-                agraviado=cfg.get("agraviado", ""),
+                delito=cfg.get("delito", "") or ml(materia),
+                agraviado=cfg.get("agraviado", "") or "El Estado",
+                juzgado=cfg.get("juzgado", ""),
+                instruccion_particular=cfg.get("instruccion_particular", ""),
                 instruccion_general=read_instruccion_general(materia),
                 use_live_web=cfg.get("use_live_web", False),
             )
@@ -1171,6 +1278,7 @@ class FabricaWidget(QWidget):
             self._thread_id = str(uuid.uuid4())
             config = make_config(self._thread_id)
 
+            self._shortcut_state = None
             self._worker = _ArtifexWorker(self._graph, state, config, parent=self)
             self._worker.step_done.connect(self._on_step_done)
             self._worker.checkpoint_hit.connect(self._on_checkpoint_hit)
@@ -1185,16 +1293,16 @@ class FabricaWidget(QWidget):
     def _on_step_done(self, node: str):
         labels = {
             "resumen_hechos": "Resumiendo hechos…",
-            "busqueda": "Buscando fundamentos (RAG)…",
-            "redaccion": "Redactando resolución…",
-            "verificacion": "Verificando citas…",
-            "formato": "Generando .docx…",
+            "busqueda":       "Buscando fundamentos (RAG)…",
+            "redaccion":      "Redactando resolución…",
+            "verificacion":   "Verificando citas…",
+            "formato":        "Generando .docx…",
         }
         if node in labels:
             self._set_status(labels[node])
 
     def _on_checkpoint_hit(self, data: dict):
-        cp = data.get("checkpoint", "")
+        cp        = data.get("checkpoint", "")
         contenido = data.get("contenido", "")
 
         if cp == "hechos":
@@ -1208,7 +1316,7 @@ class FabricaWidget(QWidget):
         elif cp == "borrador":
             snap = self._graph.get_state(make_config_local(self._thread_id))
             citas_ok = None
-            avisos = []
+            avisos   = []
             if snap:
                 vals = snap.values
                 if isinstance(vals, dict):
@@ -1232,13 +1340,74 @@ class FabricaWidget(QWidget):
         self._set_status(f"Error: {msg[:120]}")
         QMessageBox.critical(self, "Error en la fábrica", msg)
 
+    # ── Cargar borrador existente (shortcut → checkpoint ③) ───────────────
+
+    def _on_cargar_borrador(self, path: str):
+        """Cargar borrador .md existente → salta directo a checkpoint ③."""
+        from app.core.file_manager import read_instruccion_general, materia_label as ml
+
+        borrador = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+        if not borrador:
+            self._set_status("El archivo está vacío.")
+            return
+
+        cfg     = self._current_cfg
+        materia = cfg.get("materia", "prision_preventiva")
+
+        try:
+            from app.artifex.state import CasoState, Postura, Etapa
+            from app.artifex.nodes import node_verificacion
+
+            postura_map = {
+                "confirmar":       Postura.CONFIRMAR,
+                "revocar":         Postura.REVOCAR,
+                "revocar_parcial": Postura.REVOCAR_PARCIAL,
+            }
+            postura = postura_map.get(cfg.get("postura", "confirmar"), Postura.CONFIRMAR)
+
+            caso_path   = cfg.get("caso_path", "")
+            caso_folder = Path(caso_path) if caso_path else Path(".")
+
+            state = CasoState(
+                materia=materia,
+                materia_label=ml(materia),
+                folder_name=caso_folder.name,
+                expediente=cfg.get("expediente", ""),
+                imputados=cfg.get("imputados", ""),
+                delito=cfg.get("delito", "") or ml(materia),
+                agraviado=cfg.get("agraviado", "") or "El Estado",
+                juzgado=cfg.get("juzgado", ""),
+                postura=postura,
+                instruccion_general=read_instruccion_general(materia),
+                borrador=borrador,
+                etapa=Etapa.VERIFICACION,
+            )
+            state = node_verificacion(state)
+        except Exception as e:
+            self._set_status(f"Error al cargar borrador: {e}")
+            return
+
+        avisos_e4 = [a for a in state.avisos if a.startswith("[E4]")]
+        nota = ("\n\nAVISOS DE VALIDACION:\n" + "\n".join(avisos_e4)) if avisos_e4 else ""
+        self._borrador.set_borrador(
+            borrador + nota,
+            citas_ok=state.citas_ok,
+            avisos=state.avisos,
+        )
+        self._thread_id      = ""
+        self._shortcut_state = state
+        self._go(3)
+        self._set_status(f"Borrador cargado: {Path(path).name}")
+
     # ── Resumir después de checkpoints ───────────────────────────────────
 
     def _resume(self, response: dict):
         from app.artifex.graph import make_config
         from langgraph.types import Command
         config = make_config(self._thread_id)
-        self._worker = _ArtifexWorker(self._graph, Command(resume=response), config, parent=self)
+        self._worker = _ArtifexWorker(
+            self._graph, Command(resume=response), config, parent=self
+        )
         self._worker.step_done.connect(self._on_step_done)
         self._worker.checkpoint_hit.connect(self._on_checkpoint_hit)
         self._worker.pipeline_done.connect(self._on_pipeline_done)
@@ -1254,11 +1423,29 @@ class FabricaWidget(QWidget):
         self._resume({"accion": "aprobar", "texto": texto})
 
     def _on_borrador_aprobado(self, texto: str):
-        self._set_status("Generando .docx…")
-        self._resume({"accion": "aprobar", "texto": texto})
+        if self._shortcut_state is not None:
+            self._shortcut_export(texto)
+        else:
+            self._set_status("Generando .docx…")
+            self._resume({"accion": "aprobar", "texto": texto})
+
+    def _shortcut_export(self, borrador: str):
+        """Exporta .docx directamente sin pasar por el grafo (modo cargar borrador)."""
+        from app.artifex.nodes import node_formato
+        state = self._shortcut_state
+        state.borrador = borrador
+        try:
+            state = node_formato(state)
+            docx = state.documento_final or ""
+            self._final.set_docx(docx, expediente=state.expediente)
+            self._go(4)
+            self._set_status("✓ Resolución generada.")
+        except Exception as e:
+            self._set_status(f"Error al exportar: {e}")
 
     def _on_reiniciar(self):
-        self._thread_id = None
+        self._thread_id      = None
+        self._shortcut_state = None
         self._set_status("Lista para iniciar.")
         self._go(0)
 
