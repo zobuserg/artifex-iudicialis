@@ -37,9 +37,10 @@ _documentos_prueba/
 # Logs de arranque generados en esta sesión
 _startup_stderr.log
 _startup_stdout.log
-# Notas sueltas .md en la raíz (posibles notas del vault) — solo se versiona README.md
+# Notas sueltas .md en la raíz (posibles notas del vault)
 *.md
 !README.md
+!CLAUDE.md
 # Log de ingesta del corpus (puede contener nombres de expedientes reales)
 scripts/_last_corpus_ingest.log
 # Archivos de vault Obsidian sueltos (posible contenido del juez)
