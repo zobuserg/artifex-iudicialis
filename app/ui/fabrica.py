@@ -49,6 +49,8 @@ from app.core.file_manager import (
     BASE_DIR,
     MATERIA_LABELS,
     MATERIA_SLUGS,
+    SLOT_KEYS,
+    add_to_case,
     list_case_folders,
     materia_label,
     read_fuentes_slots,
@@ -354,10 +356,138 @@ class _RewriteWorker(QThread):
             self.error.emit(str(exc))
 
 
-# ── Pantalla 0: El caso (slot-based workflow) ─────────────────────────────────
+# ── Widget de ranura de documentos ────────────────────────────────────────────
+
+class _SlotCard(QWidget):
+    """Tarjeta visual de una ranura del expediente (p. ej. 'solicitud_inicial').
+
+    Muestra cuántos archivos hay, sus nombres, y permite agregar más con un botón +.
+    """
+
+    files_changed = pyqtSignal()   # se emite cuando se agregan archivos
+
+    def __init__(self, slot_key: str, label: str, caso_folder: Path | None = None, parent=None):
+        super().__init__(parent)
+        self._slot_key = slot_key
+        self._caso_folder = caso_folder
+        self._files: list[Path] = []
+
+        self.setStyleSheet(
+            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
+        )
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(12)
+
+        # Indicador de estado (círculo)
+        self._dot = QLabel("○")
+        self._dot.setFixedWidth(20)
+        self._dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._dot.setStyleSheet(f"color: {_C['faint']}; font-size: 16px; border: none;")
+        lay.addWidget(self._dot)
+
+        # Textos
+        txt_w = QWidget()
+        txt_w.setStyleSheet("border: none;")
+        tl = QVBoxLayout(txt_w)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(1)
+        self._title = _lbl(label, bold=True, size=12)
+        self._title.setStyleSheet(f"color: {_C['ink']}; font-size: 12px; font-weight: 700; border: none;")
+        tl.addWidget(self._title)
+        self._detail = _lbl("sin archivos", color=_C["faint"], size=10)
+        self._detail.setStyleSheet(f"color: {_C['faint']}; font-size: 10px; border: none;")
+        tl.addWidget(self._detail)
+        lay.addWidget(txt_w, 1)
+
+        # Contador
+        self._count_lbl = _lbl("0", bold=True, size=12, color=_C["faint"])
+        self._count_lbl.setFixedWidth(28)
+        self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._count_lbl.setStyleSheet(
+            f"background: {_C['panel2']}; color: {_C['faint']}; "
+            f"border-radius: 7px; font-size: 12px; font-weight: 700; "
+            f"padding: 2px; border: none;"
+        )
+        lay.addWidget(self._count_lbl)
+
+        # Botón agregar
+        self._btn_add = QPushButton("+")
+        self._btn_add.setToolTip("Agregar archivos a esta ranura")
+        self._btn_add.setFixedSize(28, 28)
+        self._btn_add.setStyleSheet(
+            f"QPushButton {{ background: {_C['panel2']}; color: {_C['teal_d']}; "
+            f"border: 1px solid {_C['hair']}; border-radius: 7px; "
+            f"font-size: 16px; font-weight: 700; padding: 0; }}"
+            f"QPushButton:hover {{ background: {_C['teal_s']}; border-color: {_C['teal']}; }}"
+        )
+        self._btn_add.clicked.connect(self._on_add_files)
+        lay.addWidget(self._btn_add)
+
+    def set_files(self, files: list[Path]):
+        self._files = list(files)
+        n = len(self._files)
+        if n == 0:
+            self._dot.setText("○")
+            self._dot.setStyleSheet(f"color: {_C['faint']}; font-size: 16px; border: none;")
+            self._detail.setText("sin archivos")
+            self._detail.setStyleSheet(f"color: {_C['faint']}; font-size: 10px; border: none;")
+            self._count_lbl.setText("0")
+            self._count_lbl.setStyleSheet(
+                f"background: {_C['panel2']}; color: {_C['faint']}; "
+                f"border-radius: 7px; font-size: 12px; font-weight: 700; padding: 2px; border: none;"
+            )
+            self.setStyleSheet(
+                f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
+            )
+        else:
+            self._dot.setText("●")
+            self._dot.setStyleSheet(f"color: {_C['teal']}; font-size: 16px; border: none;")
+            names = [f.name for f in self._files[:3]]
+            detail = ", ".join(names) + ("…" if n > 3 else "")
+            self._detail.setText(detail)
+            self._detail.setStyleSheet(f"color: {_C['teal_d']}; font-size: 10px; border: none;")
+            self._count_lbl.setText(str(n))
+            self._count_lbl.setStyleSheet(
+                f"background: {_C['teal_s']}; color: {_C['teal_d']}; "
+                f"border-radius: 7px; font-size: 12px; font-weight: 700; padding: 2px; border: none;"
+            )
+            self.setStyleSheet(
+                f"background: {_C['card']}; border: 1.5px solid {_C['teal']}; border-radius: 11px;"
+            )
+
+    def set_caso_folder(self, folder: Path | None):
+        self._caso_folder = folder
+
+    def _on_add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            f"Agregar a: {self._title.text()}",
+            str(BASE_DIR / "01_raw"),
+            "Documentos (*.pdf *.docx *.doc *.txt *.md)",
+        )
+        if not paths or not self._caso_folder:
+            return
+        slot_dir = self._caso_folder / self._slot_key
+        slot_dir.mkdir(parents=True, exist_ok=True)
+        for p in paths:
+            add_to_case(Path(p), self._caso_folder, self._slot_key)
+        # Releer archivos del slot
+        new_files = list(slot_dir.iterdir()) if slot_dir.exists() else []
+        self.set_files([f for f in new_files if f.is_file()])
+        self.files_changed.emit()
+
+
+# ── Pantalla 0: El caso ─────────────────────────────────────────────────────
 
 class _SetupScreen(QWidget):
-    """Pantalla 0 — el juez selecciona la carpeta del caso y configura el expediente."""
+    """Pantalla 0 — el juez configura el caso antes de iniciar la fábrica.
+
+    Evolución del viejo Adiutor: mismo flujo (materia→caso→metadata→postura)
+    pero ahora con vista de ranuras que muestra qué archivos hay en cada slot,
+    permite agregar archivos inline, y da retroalimentación visual antes de iniciar.
+    """
 
     iniciar         = pyqtSignal(dict)   # config dict cuando pulsa Iniciar
     cargar_borrador = pyqtSignal(str)    # path .md cuando pulsa Cargar borrador
@@ -366,37 +496,36 @@ class _SetupScreen(QWidget):
         super().__init__(parent)
         self.setStyleSheet(f"background: {_C['paper']};")
         self._live_web = False
+        self._slot_cards: dict[str, _SlotCard] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 28)
         root.setSpacing(0)
 
-        # Título
+        # ── Título ──
         t = _lbl("Preparar el caso", bold=True, size=24)
         t.setStyleSheet(f"color: {_C['ink']}; font-size: 24px; font-weight: 700;")
         root.addWidget(t)
         root.addSpacing(6)
         root.addWidget(_lbl(
-            "Seleccione el tipo de caso y la carpeta del expediente. "
-            "La fábrica leerá automáticamente los documentos organizados en sus ranuras.",
+            "Seleccione la materia y el expediente. Revise las ranuras de documentos "
+            "— puede agregar archivos directamente desde aquí.",
             color=_C["ink2"], size=13,
         ))
         root.addSpacing(20)
 
-        # Layout de dos columnas
-        cols = QWidget()
-        cols_lay = QHBoxLayout(cols)
-        cols_lay.setContentsMargins(0, 0, 0, 0)
-        cols_lay.setSpacing(20)
+        # ── Fila superior: materia + caso ──
+        top_row = QWidget()
+        top_lay = QHBoxLayout(top_row)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.setSpacing(16)
 
-        # ── Columna izquierda ──
-        left = QWidget()
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(14)
-
-        # ① Tipo de caso (materia)
-        left_lay.addWidget(_section_label("① Tipo de caso"))
+        # Materia
+        mat_w = QWidget()
+        mat_l = QVBoxLayout(mat_w)
+        mat_l.setContentsMargins(0, 0, 0, 0)
+        mat_l.setSpacing(6)
+        mat_l.addWidget(_section_label("Materia"))
         self._cmb_materia = QComboBox()
         self._cmb_materia.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
         _default_idx = 0
@@ -407,35 +536,86 @@ class _SetupScreen(QWidget):
                 _default_idx = i
         self._cmb_materia.setCurrentIndex(_default_idx)
         self._cmb_materia.currentIndexChanged.connect(self._on_materia_changed)
-        left_lay.addWidget(self._cmb_materia)
+        mat_l.addWidget(self._cmb_materia)
+        top_lay.addWidget(mat_w, 2)
 
-        # ② Caso (carpeta)
+        # Caso
+        caso_w = QWidget()
+        caso_l = QVBoxLayout(caso_w)
+        caso_l.setContentsMargins(0, 0, 0, 0)
+        caso_l.setSpacing(6)
         caso_header = QWidget()
-        caso_h_lay = QHBoxLayout(caso_header)
-        caso_h_lay.setContentsMargins(0, 0, 0, 0)
-        caso_h_lay.setSpacing(8)
-        caso_h_lay.addWidget(_section_label("② Caso"))
-        caso_h_lay.addStretch()
+        ch_lay = QHBoxLayout(caso_header)
+        ch_lay.setContentsMargins(0, 0, 0, 0)
+        ch_lay.setSpacing(8)
+        ch_lay.addWidget(_section_label("Caso"))
+        ch_lay.addStretch()
         self._btn_refresh = QPushButton("↻")
         self._btn_refresh.setToolTip("Actualizar lista de casos")
         self._btn_refresh.setStyleSheet(_BTN_SMALL_GHOST)
         self._btn_refresh.setFixedWidth(36)
         self._btn_refresh.clicked.connect(self._refresh_casos)
-        caso_h_lay.addWidget(self._btn_refresh)
-        left_lay.addWidget(caso_header)
-
+        ch_lay.addWidget(self._btn_refresh)
+        caso_l.addWidget(caso_header)
         self._cmb_caso = QComboBox()
         self._cmb_caso.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
-        left_lay.addWidget(self._cmb_caso)
-        self._caso_hint = _lbl("Seleccione el expediente de la lista.", color=_C["faint"], size=11)
-        left_lay.addWidget(self._caso_hint)
+        self._cmb_caso.currentIndexChanged.connect(self._on_caso_changed)
+        caso_l.addWidget(self._cmb_caso)
+        top_lay.addWidget(caso_w, 3)
 
-        # ③ Datos del expediente
-        left_lay.addWidget(_section_label("③ Datos del expediente"))
-        grid_w = QWidget()
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(10)
+        root.addWidget(top_row)
+        root.addSpacing(16)
+
+        # ── Panel de ranuras del expediente (la evolución principal) ──
+        slots_header = QWidget()
+        sh_lay = QHBoxLayout(slots_header)
+        sh_lay.setContentsMargins(0, 0, 0, 0)
+        sh_lay.setSpacing(8)
+        sh_lay.addWidget(_section_label("Documentos del expediente"))
+        sh_lay.addStretch()
+        self._slots_summary = _lbl("", color=_C["faint"], size=11)
+        sh_lay.addWidget(self._slots_summary)
+        root.addWidget(slots_header)
+        root.addSpacing(8)
+
+        # Grid 2×3 de tarjetas de ranura
+        slots_grid = QWidget()
+        sg = QGridLayout(slots_grid)
+        sg.setContentsMargins(0, 0, 0, 0)
+        sg.setSpacing(8)
+
+        # Etiquetas default — se actualizan cuando cambia la materia
+        default_labels = {
+            "solicitud_inicial": "Solicitud / requerimiento",
+            "resolucion_apelada": "Resolución apelada",
+            "recurso_apelacion": "Recurso de apelación",
+            "anexos": "Anexos / pruebas",
+            "audio": "Audio de audiencia",
+            "otros": "Otros",
+        }
+        for idx, slot_key in enumerate(SLOT_KEYS):
+            card = _SlotCard(slot_key, default_labels.get(slot_key, slot_key))
+            card.files_changed.connect(self._update_slots_summary)
+            self._slot_cards[slot_key] = card
+            row = idx // 3
+            col = idx % 3
+            sg.addWidget(card, row, col)
+
+        root.addWidget(slots_grid)
+        root.addSpacing(16)
+
+        # ── Fila central: datos del expediente (grid 2×3) + postura ──
+        mid_row = QWidget()
+        mid_lay = QHBoxLayout(mid_row)
+        mid_lay.setContentsMargins(0, 0, 0, 0)
+        mid_lay.setSpacing(20)
+
+        # Datos
+        datos_w = QWidget()
+        datos_l = QVBoxLayout(datos_w)
+        datos_l.setContentsMargins(0, 0, 0, 0)
+        datos_l.setSpacing(6)
+        datos_l.addWidget(_section_label("Datos del expediente"))
 
         def _inp(ph: str) -> QLineEdit:
             w = QLineEdit()
@@ -449,62 +629,77 @@ class _SetupScreen(QWidget):
         self._agr = _inp("Agraviado")
         self._juz = _inp("Juzgado de origen")
 
+        grid_w = QWidget()
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(8)
         grid.addWidget(self._exp, 0, 0)
         grid.addWidget(self._imp, 0, 1)
         grid.addWidget(self._del, 1, 0)
         grid.addWidget(self._agr, 1, 1)
         grid.addWidget(self._juz, 2, 0, 1, 2)
+        datos_l.addWidget(grid_w)
+        mid_lay.addWidget(datos_w, 3)
 
-        left_lay.addWidget(grid_w)
+        # Postura + instrucción + fuentes (columna derecha compacta)
+        right_w = QWidget()
+        right_l = QVBoxLayout(right_w)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        right_l.setSpacing(10)
 
-        # ④ Postura
-        left_lay.addWidget(_section_label("④ Postura"))
+        right_l.addWidget(_section_label("Postura"))
         self._cmb_postura = QComboBox()
         self._cmb_postura.setStyleSheet(_INPUT_SS + "QComboBox { padding: 10px 14px; }")
         self._cmb_postura.addItem("CONFIRMAR",            userData="confirmar")
         self._cmb_postura.addItem("REVOCAR",              userData="revocar")
         self._cmb_postura.addItem("REVOCAR PARCIALMENTE", userData="revocar_parcial")
-        left_lay.addWidget(self._cmb_postura)
+        right_l.addWidget(self._cmb_postura)
 
-        # ⑤ Instrucción particular
-        left_lay.addWidget(_section_label("⑤ Instrucción particular (opcional)"))
+        right_l.addWidget(_section_label("Instrucción particular"))
         self._instruccion = QPlainTextEdit()
         self._instruccion.setPlaceholderText("Notas del juez para este caso…")
-        self._instruccion.setStyleSheet(_INPUT_SS + "QPlainTextEdit { min-height: 70px; max-height: 100px; }")
-        self._instruccion.setMaximumHeight(100)
-        left_lay.addWidget(self._instruccion)
-
-        left_lay.addStretch()
-        cols_lay.addWidget(left, 3)
-
-        # ── Columna derecha (fuentes) ──
-        right = QWidget()
-        right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(14)
-
-        right_lay.addWidget(_section_label("Fuentes de consulta"))
-
-        rag_row = self._make_toggle_row(
-            "📚  Biblioteca jurídica",
-            "Códigos, jurisprudencia y resoluciones previas — siempre activo.",
-            locked=True,
+        self._instruccion.setStyleSheet(
+            _INPUT_SS + "QPlainTextEdit { min-height: 50px; max-height: 80px; }"
         )
-        right_lay.addWidget(rag_row)
+        self._instruccion.setMaximumHeight(80)
+        right_l.addWidget(self._instruccion)
 
-        self._live_btn, live_row = self._make_toggle_row_with_btn(
-            "🌐  Boletines oficiales en vivo",
-            "Busca en LP Derecho, SPIJ, Gaceta Jurídica publicaciones recientes (Tavily).",
+        # Fuentes inline
+        right_l.addWidget(_section_label("Fuentes"))
+        src_row = QWidget()
+        src_row.setStyleSheet(
+            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 10px;"
         )
-        right_lay.addWidget(live_row)
+        src_lay = QHBoxLayout(src_row)
+        src_lay.setContentsMargins(12, 8, 12, 8)
+        src_lay.setSpacing(8)
+        src_txt = _lbl("📚 RAG activo", bold=True, size=11)
+        src_txt.setStyleSheet(f"color: {_C['sage']}; font-size: 11px; font-weight: 700; border: none;")
+        src_lay.addWidget(src_txt)
+        src_lay.addStretch()
+        self._live_btn = QPushButton("🌐 En vivo")
+        self._live_btn.setCheckable(True)
+        self._live_btn.setToolTip("Buscar en LP Derecho, SPIJ, Gaceta Jurídica (Tavily)")
+        self._live_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_C['hair']}; color: {_C['ink2']};
+                border: none; border-radius: 7px;
+                padding: 4px 10px; font-size: 11px; font-weight: 600;
+            }}
+            QPushButton:checked {{ background: {_C['teal']}; color: #fff; }}
+        """)
+        self._live_btn.toggled.connect(lambda on: setattr(self, "_live_web", on))
+        src_lay.addWidget(self._live_btn)
+        right_l.addWidget(src_row)
 
-        right_lay.addStretch()
-        cols_lay.addWidget(right, 2)
+        right_l.addStretch()
+        mid_lay.addWidget(right_w, 2)
 
-        root.addWidget(cols)
-        root.addSpacing(24)
+        root.addWidget(mid_row)
+        root.addStretch()
+        root.addSpacing(12)
 
-        # Botones
+        # ── Botones finales ──
         btn_row = QWidget()
         br = QHBoxLayout(btn_row)
         br.setContentsMargins(0, 0, 0, 0)
@@ -512,6 +707,10 @@ class _SetupScreen(QWidget):
 
         self._btn_borrador = QPushButton("📂  Cargar borrador .md")
         self._btn_borrador.setStyleSheet(_BTN_GHOST)
+        self._btn_borrador.setToolTip(
+            "Cargar un borrador existente (.md) y saltar directo al\n"
+            "Control ③ — evita los ~18 minutos de E1-E3."
+        )
         self._btn_borrador.clicked.connect(self._on_cargar_borrador)
         br.addWidget(self._btn_borrador)
 
@@ -524,60 +723,8 @@ class _SetupScreen(QWidget):
 
         root.addWidget(btn_row)
 
-        # Poblar casos para la materia por defecto
+        # Poblar al inicio
         self._refresh_casos()
-
-    # ── Helpers de UI ────────────────────────────────────────────────────
-
-    def _make_toggle_row(self, title: str, desc: str, locked: bool = False) -> QWidget:
-        row = QWidget()
-        row.setStyleSheet(
-            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
-        )
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(16, 12, 16, 12)
-        txt = QWidget()
-        tl = QVBoxLayout(txt)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(2)
-        tl.addWidget(_lbl(title, bold=True, size=13))
-        tl.addWidget(_lbl(desc, color=_C["faint"], size=11))
-        rl.addWidget(txt, 1)
-        if locked:
-            badge = _lbl("✓ activo", color=_C["sage"], size=11, bold=True)
-            badge.setStyleSheet(
-                f"color: {_C['sage']}; font-size: 11px; font-weight: 700;"
-            )
-            rl.addWidget(badge)
-        return row
-
-    def _make_toggle_row_with_btn(self, title: str, desc: str) -> tuple[QPushButton, QWidget]:
-        row = QWidget()
-        row.setStyleSheet(
-            f"background: {_C['card']}; border: 1px solid {_C['hair']}; border-radius: 11px;"
-        )
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(16, 12, 16, 12)
-        txt = QWidget()
-        tl = QVBoxLayout(txt)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(2)
-        tl.addWidget(_lbl(title, bold=True, size=13))
-        tl.addWidget(_lbl(desc, color=_C["faint"], size=11))
-        rl.addWidget(txt, 1)
-        btn = QPushButton("Activar")
-        btn.setCheckable(True)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {_C['hair']}; color: {_C['ink2']};
-                border: none; border-radius: 8px;
-                padding: 6px 14px; font-size: 12px; font-weight: 600;
-            }}
-            QPushButton:checked {{ background: {_C['teal']}; color: #fff; }}
-        """)
-        btn.toggled.connect(lambda on: setattr(self, "_live_web", on))
-        rl.addWidget(btn)
-        return btn, row
 
     # ── Lógica ───────────────────────────────────────────────────────────
 
@@ -585,24 +732,67 @@ class _SetupScreen(QWidget):
         data = self._cmb_materia.currentData()
         return data if data else "prision_preventiva"
 
+    def _current_caso_path(self) -> Path | None:
+        data = self._cmb_caso.currentData()
+        return Path(data) if data else None
+
     def _on_materia_changed(self, _idx: int):
         self._refresh_casos()
+        # Actualizar etiquetas de las ranuras según la materia
+        materia = self._current_materia_slug()
+        labels = slot_labels_for(materia)
+        for key, card in self._slot_cards.items():
+            card._title.setText(labels.get(key, key))
+
+    def _on_caso_changed(self, _idx: int):
+        self._refresh_slots()
 
     def _refresh_casos(self):
         materia = self._current_materia_slug()
+        self._cmb_caso.blockSignals(True)
         self._cmb_caso.clear()
         carpetas = list_case_folders(materia)
         if not carpetas:
-            self._cmb_caso.addItem("— ningún caso encontrado —", userData="")
-            self._caso_hint.setText(
-                f"No hay carpetas caso_* en 01_raw/{materia}/. Créelas primero."
+            self._cmb_caso.addItem("— sin casos —", userData="")
+        else:
+            for p in carpetas:
+                self._cmb_caso.addItem(p.name, userData=str(p))
+        self._cmb_caso.blockSignals(False)
+        # Actualizar etiquetas de las ranuras
+        labels = slot_labels_for(materia)
+        for key, card in self._slot_cards.items():
+            card._title.setText(labels.get(key, key))
+        self._refresh_slots()
+
+    def _refresh_slots(self):
+        """Lee los archivos de cada ranura del caso seleccionado y actualiza las tarjetas."""
+        caso = self._current_caso_path()
+        total = 0
+        for key, card in self._slot_cards.items():
+            card.set_caso_folder(caso)
+            if caso and caso.exists():
+                slot_dir = caso / key
+                if slot_dir.is_dir():
+                    files = [f for f in slot_dir.iterdir() if f.is_file()]
+                else:
+                    files = []
+            else:
+                files = []
+            card.set_files(files)
+            total += len(files)
+        self._update_slots_summary()
+
+    def _update_slots_summary(self):
+        total = sum(len(c._files) for c in self._slot_cards.values())
+        filled = sum(1 for c in self._slot_cards.values() if c._files)
+        if total == 0:
+            self._slots_summary.setText("Sin documentos cargados")
+            self._slots_summary.setStyleSheet(f"color: {_C['alert']}; font-size: 11px;")
+        else:
+            self._slots_summary.setText(
+                f"{total} archivo(s) en {filled} de {len(SLOT_KEYS)} ranuras"
             )
-            return
-        for p in carpetas:
-            self._cmb_caso.addItem(p.name, userData=str(p))
-        self._caso_hint.setText(
-            f"{len(carpetas)} caso(s) encontrado(s). Seleccione uno."
-        )
+            self._slots_summary.setStyleSheet(f"color: {_C['teal_d']}; font-size: 11px;")
 
     def _on_cargar_borrador(self):
         path, _ = QFileDialog.getOpenFileName(
