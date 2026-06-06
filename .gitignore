@@ -41,6 +41,7 @@ _startup_stdout.log
 *.md
 !README.md
 !CLAUDE.md
+!docs/*.md
 # Log de ingesta del corpus (puede contener nombres de expedientes reales)
 scripts/_last_corpus_ingest.log
 # Archivos de vault Obsidian sueltos (posible contenido del juez)
