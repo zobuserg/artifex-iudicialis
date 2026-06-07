@@ -33,6 +33,25 @@ E6  node_formato              → exporta .docx con encabezado institucional ofi
 Los tres `interrupt()` de LangGraph pausan el grafo. La UI reanuda con
 `Command(resume={"accion": "aprobar", "texto": "..."})`.
 
+## Entrada / Salida — HECHOS CANÓNICOS (no re-investigar)
+
+**Lectura (cualquier formato):** el lector universal es
+`app/core/claude_worker.py::read_file_text()`. Soporta `.pdf .docx .doc .pages .md
+.txt` + audio. La fuente de verdad de formatos es `DOC_SUFFIXES` y el helper
+`qt_open_filter()`. **TODOS los QFileDialog de la UI usan `qt_open_filter()`** — no
+hardcodear filtros. Para agregar un formato: ampliar `read_file_text` + `DOC_SUFFIXES`.
+
+**Exportación (renderizado del .docx):** el renderizador OFICIAL es
+`app/core/word_export.py::text_to_docx_faithful()` — reproduce el texto del modelo
+LITERAL (respeta el formato de la plantilla, no reinyecta cabecera). Lo usan E6
+(`node_formato`) y la revisión. `markdown_to_docx()` es LEGACY y NO se usa.
+**Membrete pág. 1**: si existe `app/resources/membrete.png` (imagen válida >1KB), se
+inserta a ancho de cuerpo al inicio de la página 1 (`_insert_membrete`) y se OMITEN
+las líneas de texto PODER JUDICIAL/CORTE/SALA (ya están en la imagen, evita duplicar).
+
+> Mapa de arquitectura completo en
+> `/Users/dagumar/.claude/projects/-Users-dagumar/memory/project_architecture.md`.
+
 ## Archivos clave
 
 ```
@@ -80,19 +99,39 @@ Configurar en `.env`:
 ADIUTOR_CLAUDE_RESOLUTION_MODEL=claude-opus-4-5,claude-sonnet-4-5
 ```
 
-**NO usar:** `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` — no disponibles
-en esta cuenta.
+Además, el pre-filtro de artículos (E2, `wiki_worker.extract_relevant_articles`) usa:
+- `claude-haiku-4-5-20251001` ← SÍ disponible y verificado en esta cuenta (~1s).
 
-## Encabezado institucional del .docx
+**NO usar:** `claude-opus-4-7`, `claude-sonnet-4-6` — no disponibles en esta cuenta.
+(El fallback viejo `claude-3-5-haiku-20241022` da 404; el primario Haiku 4.5 funciona.)
 
-El sistema agrega automáticamente el encabezado en `word_export.py`:
-```
-PODER JUDICIAL
-CORTE SUPERIOR DE JUSTICIA DE ICA
-SALA PENAL DE APELACIONES DE CHINCHA Y PISCO
-```
-Claude **no debe** repetir este encabezado en el borrador. Ver `_espina_aprobada()`
-en `nodes.py` — ya tiene la instrucción explícita.
+## Rendimiento — códigos globales en texto plano
+
+`01_raw/bibliografia/global/` debe contener los códigos (CP, CPP, Constitución)
+como **.txt**, no PDF. E2 los lee en cada generación; en PDF (175 MB) tardaba
+~140 s por corrida, en .txt es instantáneo. Los PDF originales se guardan en
+`01_raw/bibliografia/_global_pdf_originales/`. Si se agregan códigos nuevos en
+PDF, conviene convertirlos a .txt una sola vez.
+
+## Formato del .docx — FIDELIDAD A LA PLANTILLA (cambiado 2026-06-07)
+
+**Una sola fuente de formato: la plantilla.** El modelo reproduce el encabezado y el
+formato EXACTOS de la plantilla (Bloque 3), incluyendo PODER JUDICIAL / CORTE / el
+nombre de la Sala tal como aparece en la plantilla y el bloque de metadatos. El
+exportador renderiza ese texto **tal cual**, sin reinyectar cabecera ni reformatear.
+
+- Renderizador: `word_export.text_to_docx_faithful()` (NO `markdown_to_docx`).
+  Usado por E6 (`node_formato`) y por la función "Revisar resolución" (`fabrica.py`).
+- Instrucción al modelo: `_espina_aprobada()` en `nodes.py` le ordena reproducir el
+  encabezado y formato de la plantilla al pie de la letra (antes le decía lo
+  contrario — esa contradicción causaba encabezados duplicados y "SALA PENAL" en
+  lugar de "SALA SUPERIOR PENAL").
+- `markdown_to_docx()` se conserva por compatibilidad pero ya NO se usa en el pipeline.
+
+**Por qué:** son resoluciones judiciales, no borradores — el formato debe ser
+estricto e idéntico a la plantilla. El estilo de casa hardcodeado en
+`markdown_to_docx` no respetaba las diferencias entre plantillas (p. ej. punto final
+en títulos romanos, nombre de la Sala).
 
 ## Estado del proyecto (al momento de este commit)
 
@@ -128,6 +167,23 @@ en `nodes.py` — ya tiene la instrucción explícita.
 ```
 
 Los outputs de test van a `outputs/prueba_cadena/` (ignorado por git).
+
+## Memoria de sesión — LEER AL INICIAR
+
+Al iniciar cualquier sesión en este proyecto, leer obligatoriamente:
+
+```
+/Users/dagumar/.claude/projects/-Users-dagumar/memory/MEMORY.md
+```
+
+Ese índice apunta a los archivos de memoria relevantes. Leer los que apliquen al
+trabajo de la sesión antes de responder cualquier pregunta técnica.
+
+**Actualizar la memoria cuando:**
+- Termina una regeneración de resolución (con resultado en chars)
+- Se confirma o descarta un fix de calidad
+- Cambia el objetivo del troubleshooting activo
+- El juez aprueba un resultado como satisfactorio
 
 ## Cómo instalar desde cero (en otra máquina)
 

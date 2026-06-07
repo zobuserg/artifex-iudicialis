@@ -40,7 +40,7 @@ def call_model(
             }
             if system:
                 kwargs["system"] = system
-            resp = client.messages.create(**kwargs)
+            resp = client.messages.create(**kwargs, timeout=600)
             text = "".join(
                 getattr(block, "text", "") for block in resp.content
             ).strip()

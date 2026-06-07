@@ -23,7 +23,7 @@ class ArtifexWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Artifex Iudicialis — Fábrica de Resoluciones")
+        self.setWindowTitle("Adiutor Iudicis.2 — Redactor de Resoluciones")
         self.resize(1100, 760)
         self.setMinimumSize(860, 600)
         self.setStyleSheet(f"QMainWindow {{ background: {_C['paper']}; }}")

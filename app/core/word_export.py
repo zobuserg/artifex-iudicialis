@@ -77,6 +77,13 @@ _RESOURCES_DIR = Path(__file__).resolve().parent.parent / "resources"
 _INSTITUTIONAL_BANNER = _RESOURCES_DIR / "institutional_header_banner.png"
 _COL_LOGO = Cm(2.85)   # columna del logotipo en cabecera de 1ª página
 
+# Membrete institucional (escudo + PODER JUDICIAL + CORTE SUPERIOR + SALA) para la
+# PÁGINA 1 del renderizador fiel. Si existe una imagen válida, se inserta a lo ancho
+# del cuerpo al inicio de la pág. 1, y el renderizador OMITE las líneas de texto del
+# encabezado (PODER JUDICIAL / CORTE / SALA) para no duplicarlas con la imagen.
+# Coloca aquí el membrete oficial (PNG, idealmente fondo transparente).
+_MEMBRETE = _RESOURCES_DIR / "membrete.png"
+
 
 # ── Helpers base ─────────────────────────────────────────────────────────────
 
@@ -357,7 +364,7 @@ _RE_TITULO = re.compile(
     re.IGNORECASE,
 )
 # RESOLUCIÓN Nº (numeración)
-_RE_RESOL_NUM = re.compile(r"^RESOLUCIÓN\s+N[ºo°]\s*\d+", re.IGNORECASE)
+_RE_RESOL_NUM = re.compile(r"^RESOLUCI[OÓ]N\s+N[.\s]*[º°o]?\s*\d+", re.IGNORECASE)
 
 # Cita entre comillas (párrafo de cita doctrinal o legal)
 _RE_QUOTE = re.compile(r'^[\"\u201c\u201d\u2018\u2019\(…\)].{0,10}')
@@ -620,6 +627,153 @@ def markdown_to_docx(
             except OSError:
                 pass
 
+    return dest_path
+
+
+# ── Renderizador FIEL (función "Revisar resolución") ──────────────────────────
+# A diferencia de markdown_to_docx(), este renderizador NO impone el estilo de
+# casa ni reinyecta el encabezado institucional: reproduce el texto del modelo tal
+# cual, preservando el encabezado original, los puntos finales de los títulos, los
+# tabs del bloque de metadatos y los subtítulos en línea propia. Se usa cuando el
+# juez sube un documento ya formateado y quiere recuperarlo con el MISMO formato.
+
+# Título romano con punto + espacio (formato real: "I.   RESOLUCIÓN ... .")
+_RE_ROMAN_TITLE = re.compile(r"^[IVXLCDM]+\.\s+\S", re.IGNORECASE)
+# Encabezado institucional (se conserva verbatim, no se filtra)
+_RE_HDR_INST = re.compile(r"^(PODER JUDICIAL|CORTE SUPERIOR|SALA\s)", re.IGNORECASE)
+# Bloque de metadatos: EXPEDIENTE : ... / IMPUTADO : ... (se conserva con sus tabs)
+_RE_META_FAITHFUL = re.compile(
+    r"^(EXPEDIENTE|IMPUTADO|DELITO|AGRAVIADO|MATERIA|PROCEDENCIA|RECURRENTE|"
+    r"RESOLUCI[OÓ]N\s+IMPUGNADA)\b.*[:\t]",
+    re.IGNORECASE,
+)
+
+
+# Líneas de texto del encabezado institucional que se OMITEN cuando hay membrete
+# (porque la imagen ya las contiene). Solo estas tres; NO toca metadatos ni cuerpo.
+_RE_HDR_SKIP = re.compile(
+    r"^(PODER\s+JUDICIAL(\s+DEL\s+PER[ÚU])?|CORTE\s+SUPERIOR\s+DE\s+JUSTICIA|"
+    r"SALA\s+(SUPERIOR\s+)?PENAL.*APELAC)",
+    re.IGNORECASE,
+)
+
+
+def _membrete_available() -> bool:
+    """True si existe un membrete válido (archivo real, no placeholder vacío)."""
+    if not _MEMBRETE.is_file():
+        return False
+    try:
+        with Image.open(_MEMBRETE) as im:
+            im.verify()
+        # Descarta placeholders triviales (< 1 KB suele ser imagen vacía)
+        return _MEMBRETE.stat().st_size > 1024
+    except Exception:
+        return False
+
+
+def _insert_membrete(doc: Document) -> None:
+    """Inserta el membrete a lo ancho del cuerpo al inicio de la página 1, si existe."""
+    if not _membrete_available():
+        return
+    try:
+        p = doc.add_paragraph()
+        _fmt(p, align=WD_ALIGN_PARAGRAPH.CENTER)
+        run = p.add_run()
+        run.add_picture(str(_MEMBRETE), width=CONTENT_WIDTH)
+    except Exception:
+        # Si la imagen falla, seguimos con el encabezado de texto solamente.
+        pass
+
+
+def text_to_docx_faithful(texto: str, dest_path: Path) -> Path:
+    """Renderiza el texto del modelo a .docx preservando su formato literal.
+
+    No filtra el encabezado, no reinyecta cabecera institucional y no reformatea
+    los títulos: lo que el modelo escribe es lo que sale. Mantiene la tipografía y
+    márgenes de la Sala (Arial Narrow, A4) para que el documento luzca oficial.
+    """
+    doc = Document()
+    _default_style(doc)
+    _page_setup(doc)
+
+    # Membrete institucional en página 1 (solo si hay un archivo válido).
+    # Si se inserta, se omiten las líneas de texto PODER JUDICIAL/CORTE/SALA.
+    membrete = _membrete_available()
+    _insert_membrete(doc)
+
+    for raw in texto.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        # Línea vacía → separador
+        if not stripped:
+            _add_para_empty(doc)
+            continue
+
+        # Encabezado Markdown → quitar # pero conservar el texto literal
+        mh = _RE_MD_H12.match(stripped) or _RE_MD_H34.match(stripped)
+        if mh:
+            stripped = mh.group(1).strip()
+
+        # Si hay membrete, omitir las líneas de texto del encabezado (ya están en
+        # la imagen) para no duplicarlas. NO afecta metadatos ni cuerpo.
+        if membrete and _RE_HDR_SKIP.match(stripped):
+            continue
+
+        # Encabezado institucional (PODER JUDICIAL / CORTE / SALA …) → centrado bold
+        if _RE_HDR_INST.match(stripped):
+            _add_para_bold_center(doc, stripped)
+            continue
+
+        # Bloque de metadatos (EXPEDIENTE : … con tabs) → bold, conservar literal
+        if _RE_META_FAITHFUL.match(stripped):
+            p = doc.add_paragraph()
+            _fmt(p)
+            _run(p, stripped, bold=True)
+            continue
+
+        # AUTO DE VISTA / SENTENCIA (título central, breve)
+        if (_RE_TITULO.match(stripped) and not _RE_RESOL_NUM.match(stripped)
+                and len(stripped) < 40):
+            _add_para_bold_center(doc, stripped, underline=True)
+            continue
+
+        # RESOLUCIÓN N° 05
+        if _RE_RESOL_NUM.match(stripped):
+            _add_para_bold_justify(doc, stripped, underline=True)
+            continue
+
+        # AUTOS y VISTOS
+        if _RE_AUTOS.match(stripped):
+            _add_para_autos(doc, stripped)
+            continue
+
+        # Sección romana "I.  TÍTULO." → bold, texto LITERAL (con su punto final)
+        if _RE_ROMAN_TITLE.match(stripped) or _RE_DECISION_SEC.match(stripped):
+            _add_para_section(doc, stripped)
+            continue
+
+        # Subapartados numerados 4.1. / 6.1.1.
+        m = _RE_SUBNUM.match(stripped)
+        if m:
+            _add_para_subnum(doc, m.group(1), m.group(2))
+            continue
+
+        # Ítems de decisión: INFUNDADO / CONFIRMARON …
+        if _RE_DECISION_KW.match(stripped):
+            _add_para_decision_item(doc, stripped)
+            continue
+
+        # S.S. y magistrados
+        if _RE_SS.match(stripped):
+            _add_para_bold_justify(doc, stripped, ind_l=IND_SECTION, ind_f=IND_FIRST_NEG)
+            continue
+
+        # Párrafo de cuerpo (justificado) — preserva subtítulos en línea propia
+        _add_para_body(doc, stripped)
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(dest_path))
     return dest_path
 
 

@@ -504,7 +504,7 @@ class ArtifexPage(QWidget):
 
         self._btn_pulir = _btn("✨  Pulir lenguaje", color=BG_CARD, fg=TEXT)
         self._btn_pulir.setToolTip(
-            "Pasa el borrador por Claude Haiku para pulir\n"
+            "Pasa el borrador por Claude Sonnet para pulir\n"
             "el lenguaje sin cambiar el fondo jurídico.\n"
             "Solo disponible en Checkpoint ③ (borrador)."
         )

@@ -61,3 +61,6 @@ artifex_state.db
 
 # Scripts de prueba locales (no son parte de la app)
 test_cadena_*.py
+
+# Datos sueltos importados del proyecto original (Cursor)
+_raiz_original/

@@ -96,6 +96,30 @@ def resolution_max_output_tokens() -> int:
     return max(4_096, min(128_000, v))
 
 
+# ── Presupuesto de tamaño del prompt (evita superar el límite de 200k tokens) ──
+# El expediente y la bibliografía se incrustan como texto; con muchos anexos el
+# prompt puede pasar el máximo de la API. Estos topes (en caracteres) limitan el
+# texto embebido priorizando lo crítico (solicitud, resolución apelada, recurso).
+_SLOTS_TEXT_BUDGET_ENV = "ADIUTOR_PROMPT_SLOTS_MAX_CHARS"
+_SLOTS_TEXT_BUDGET_DEFAULT = 280_000
+_BIB_TEXT_BUDGET_ENV = "ADIUTOR_PROMPT_BIB_MAX_CHARS"
+_BIB_TEXT_BUDGET_DEFAULT = 120_000
+
+
+def _slots_text_budget_chars() -> int:
+    try:
+        return max(20_000, int(os.environ.get(_SLOTS_TEXT_BUDGET_ENV, str(_SLOTS_TEXT_BUDGET_DEFAULT))))
+    except ValueError:
+        return _SLOTS_TEXT_BUDGET_DEFAULT
+
+
+def _bib_text_budget_chars() -> int:
+    try:
+        return max(10_000, int(os.environ.get(_BIB_TEXT_BUDGET_ENV, str(_BIB_TEXT_BUDGET_DEFAULT))))
+    except ValueError:
+        return _BIB_TEXT_BUDGET_DEFAULT
+
+
 _STREAM_MAX_ATTEMPTS_ENV = "ADIUTOR_STREAM_MAX_ATTEMPTS"
 _STREAM_RETRY_BASE_ENV = "ADIUTOR_STREAM_RETRY_BASE_SEC"
 _STREAM_RETRY_MAX_ENV = "ADIUTOR_STREAM_RETRY_MAX_SEC"
@@ -305,7 +329,7 @@ def build_resolution_system_blocks() -> list[dict]:
         {
             "type": "text",
             "text": (
-                "Eres un asistente jurídico experto de la Sala Penal de Apelaciones. "
+                "Eres un asistente jurídico experto de la Sala Superior Penal de Apelaciones. "
                 "Redactas resoluciones judiciales completas siguiendo exactamente "
                 "la estructura de la plantilla proporcionada. "
                 "Usas ÚNICAMENTE el contenido de los documentos embebidos en el prompt. "
@@ -340,6 +364,28 @@ _CONTINUATION_USER_ES = (
 # ---------------------------------------------------------------------------
 
 AUDIO_SUFFIXES = frozenset({".mp3", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac"})
+
+# Formatos de documento que read_file_text() sabe leer (texto extraíble).
+DOC_SUFFIXES = (".pdf", ".docx", ".doc", ".pages", ".md", ".txt")
+
+
+def qt_open_filter(*, include_audio: bool = False) -> str:
+    """Cadena de filtro para QFileDialog con TODOS los formatos soportados.
+
+    Fuente única de verdad: si read_file_text() aprende un formato nuevo, se agrega
+    aquí y toda la UI lo acepta. `include_audio=True` para selectores de fuentes del
+    caso (transcripción de audiencias); False para borradores/resoluciones.
+    """
+    docs = " ".join(f"*{s}" for s in DOC_SUFFIXES)
+    if include_audio:
+        audio = " ".join(f"*{s}" for s in sorted(AUDIO_SUFFIXES))
+        return (
+            f"Todos los soportados ({docs} {audio});;"
+            f"Documentos ({docs});;"
+            f"Audio ({audio});;"
+            f"Todos los archivos (*)"
+        )
+    return f"Documentos ({docs});;Todos los archivos (*)"
 
 
 def _env_whisper_auto() -> bool:
@@ -758,7 +804,7 @@ def build_enriched_prompt(
         f"{SEP}\n"
         "BLOQUE 1 · ROL Y TRIBUNAL\n"
         f"{SEP}\n"
-        "Eres asistente jurídico del juez de la Sala Penal de Apelaciones.\n"
+        "Eres asistente jurídico del juez de la Sala Superior Penal de Apelaciones.\n"
         "• Usa ÚNICAMENTE el contenido de los documentos embebidos en este prompt.\n"
         "• No inventes casaciones, artículos, libros ni referencias.\n"
         "• Si citas jurisprudencia, debe estar en la bibliografía o en la plantilla.\n"
@@ -834,6 +880,9 @@ def build_enriched_prompt(
     noncritical_extraction_failures: list[str] = []
     if has_slots:
         from app.core.file_manager import SLOT_KEYS
+        slots_budget = _slots_text_budget_chars()
+        slots_used = 0
+        slots_truncated = False
         for key in SLOT_KEYS:
             paths = slots.get(key, [])
             if not paths:
@@ -848,6 +897,20 @@ def build_enriched_prompt(
                         critical_extraction_failures.append(item)
                     else:
                         noncritical_extraction_failures.append(item)
+                # Presupuesto de tamaño: los slots críticos van primero (orden de
+                # SLOT_KEYS), así que si algo se trunca son los secundarios (anexos/otros).
+                remaining = slots_budget - slots_used
+                if remaining <= 0:
+                    fuente_parts.append(
+                        f"\n[⚠️ {Path(p).name}: omitido del prompt por límite de tamaño; "
+                        "el resumen de hechos aprobado por el juez ya recoge lo esencial.]\n"
+                    )
+                    slots_truncated = True
+                    continue
+                if len(body) > remaining:
+                    body = body[:remaining] + "\n\n[⚠️ documento truncado por límite de tamaño del prompt]"
+                    slots_truncated = True
+                slots_used += len(body)
                 fuente_parts.append(
                     wrap_untrusted_document(
                         Path(p).name,
@@ -855,6 +918,12 @@ def build_enriched_prompt(
                         source_kind=f"fuente_expediente/{key}",
                     )
                 )
+        if slots_truncated and warnings_out is not None:
+            warnings_out.append(
+                "Aviso: el expediente supera el límite de tokens del modelo; se truncaron "
+                "documentos secundarios (anexos/otros) en el prompt de redacción. Los hechos "
+                "y las fuentes aprobados por el juez no se ven afectados."
+            )
     else:
         fuente_parts.append("(No se cargaron fuentes — extrae los datos de los archivos del caso.)\n")
     blocks.append("\n".join(fuente_parts))
@@ -883,13 +952,25 @@ def build_enriched_prompt(
         + rules_for_untrusted_sources()
     ]
     has_bib = False
+    bib_budget = _bib_text_budget_chars()
+    bib_used = 0
+    bib_truncated = False
     if bibliografia:
         has_bib = True
         for p in bibliografia:
+            txt = read_file_text(p)
+            remaining = bib_budget - bib_used
+            if remaining <= 0:
+                bib_truncated = True
+                break
+            if len(txt) > remaining:
+                txt = txt[:remaining] + "\n\n[⚠️ bibliografía truncada por límite de tamaño del prompt]"
+                bib_truncated = True
+            bib_used += len(txt)
             bib_parts.append(
                 wrap_untrusted_document(
                     p.name,
-                    read_file_text(p),
+                    txt,
                     source_kind="bibliografia",
                 )
             )
@@ -907,16 +988,24 @@ def build_enriched_prompt(
         )
         if arts:
             has_bib = True
-            bib_parts.append(
-                f"\n{SEP}\n"
-                "ARTÍCULOS DE CÓDIGOS APLICABLES AL CASO\n"
-                f"{SEP}\n"
-                + wrap_untrusted_document(
-                    "articulos_codigos_global",
-                    arts,
-                    source_kind="bibliografia_global",
+            remaining = bib_budget - bib_used
+            if remaining > 0:
+                if len(arts) > remaining:
+                    arts = arts[:remaining] + "\n\n[⚠️ artículos truncados por límite de tamaño del prompt]"
+                    bib_truncated = True
+                bib_used += len(arts)
+                bib_parts.append(
+                    f"\n{SEP}\n"
+                    "ARTÍCULOS DE CÓDIGOS APLICABLES AL CASO\n"
+                    f"{SEP}\n"
+                    + wrap_untrusted_document(
+                        "articulos_codigos_global",
+                        arts,
+                        source_kind="bibliografia_global",
+                    )
                 )
-            )
+            else:
+                bib_truncated = True
         if gwarn and warnings_out is not None:
             warnings_out.append(gwarn)
 
@@ -1016,19 +1105,25 @@ def build_enriched_prompt(
             "0. Antes de redactar, identifica en las fuentes expediente, imputado(s), delito, agraviado y "
             "   procedencia; colócalos en el encabezado previo al rótulo «Auto de Vista» o "
             "   «Sentencia de Vista», no dentro del cuerpo resolutivo.\n"
-            "1. Lee ÍNTEGRAMENTE la plantilla (Bloque 3) antes de escribir.\n"
-            "   Sigue su formato común: lugar y fecha, Vistos, rótulos, orden de secciones, encabezado, "
-            "   cierre y firma, salvo aquello que contradiga los datos o particularidades del caso.\n"
+            "1. Lee ÍNTEGRAMENTE la plantilla (Bloque 3) antes de escribir. "
+            "La plantilla es el modelo de EXTENSIÓN Y PROFUNDIDAD — la resolución final debe ser "
+            "comparable en longitud y densidad jurídica a la plantilla, no más corta. "
+            "Sigue su formato: lugar y fecha, Vistos, rótulos, orden de secciones, encabezado, "
+            "cierre y firma. Cada considerando de la plantilla muestra el nivel de análisis esperado "
+            "— ese mismo nivel se aplica a los hechos del caso actual.\n"
             "2. Incorpora el sustento del **Bloque 4** (PDF en surcos, recurso(s), transcripción de audio). "
             "Si el magistrado **ordenó** explicitar **cada** ranura o un **modo** concreto de exposición (Bloques 2 o 6), "
             "respétalo; si no, integra con claridad sin dejar ranuras «invisibles».\n"
             "3. Los datos procesales salen del Bloque 4 — NO uses datos del ejemplo ficticio.\n"
             "4. Aplica la postura indicada (Bloque 6) sin oscilar: si es CONFIRMAR, no redactes fallo revocatorio "
             "ni sustituyas la medida por comparecencia u otra consecuencia incompatible.\n"
-            "5. En el rubro fundamentos del recurso, resume solo lo que aparece en el recurso de apelación; "
-            "no extraigas agravios de alegatos finales de primera instancia ni de la sentencia apelada si "
-            "el recurso no los replantea; luego absuelve cada agravio real en párrafo propio, sin fusionarlos "
-            "ni inventar argumentos.\n"
+            "5. En el rubro fundamentos del recurso, desarrolla CON PROFUNDIDAD COMPLETA cada agravio "
+            "tal como aparece en el recurso de apelación — mínimo 3 oraciones por agravio explicando "
+            "(a) qué vicio alega la defensa, (b) con qué argumento concreto lo sustenta, (c) qué "
+            "consecuencia jurídica pretende. Si el agravio tiene sub-puntos (i)(ii)(iii), recógelos "
+            "todos. NO reduzcas el agravio a una línea-título. Solo usa lo que consta en el recurso "
+            "de apelación — no extraigas agravios de alegatos de primera instancia. Luego absuelve "
+            "cada agravio en párrafo propio con la misma profundidad, sin fusionarlos ni inventar.\n"
             "5 ter. Cargos imputados por el MP: transcripción literal del escrito fiscal en solicitud_inicial; "
             "sin parafrasear, sin prueba ni valoración del a quo.\n"
         )
@@ -2045,7 +2140,7 @@ class _IterWorker(QThread):
                 bib_extra = bib_extra + "\n\n"
 
             base_context = (
-                "Eres el asistente jurídico del magistrado de la Sala Penal de Apelaciones.\n\n"
+                "Eres el asistente jurídico del magistrado de la Sala Superior Penal de Apelaciones.\n\n"
                 "## Prioridad de instrucciones (de mayor a menor)\n"
                 "1. Instrucciones del cuadro de **esta iteración**.\n"
                 "2. Instrucción **particular persistente** de este caso (formulario).\n"

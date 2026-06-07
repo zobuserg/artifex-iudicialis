@@ -40,8 +40,8 @@ def main():
         if _fusion is not None:
             app.setStyle(_fusion)
 
-    app.setApplicationName("Artifex Iudicialis")
-    app.setApplicationDisplayName("Artifex Iudicialis")
+    app.setApplicationName("Adiutor Iudicis.2")
+    app.setApplicationDisplayName("Adiutor Iudicis.2")
     app.setOrganizationName("Poder Judicial del Perú")
 
     _base = QFont()

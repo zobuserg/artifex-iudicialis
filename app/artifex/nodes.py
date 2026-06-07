@@ -27,7 +27,7 @@ from app.core.claude_worker import (
 )
 from app.core.file_manager import BASE_DIR, list_bibliografia
 from app.core.output_validator import validate_resolution_output
-from app.core.word_export import markdown_to_docx, resolution_docx_filename
+from app.core.word_export import markdown_to_docx, resolution_docx_filename, text_to_docx_faithful
 from app.core.prompt_injection_guard import (
     system_injection_guard_es,
     wrap_untrusted_document,
@@ -44,7 +44,7 @@ _SLOTS_HECHOS: tuple[str, ...] = (
 )
 
 _RESUMEN_SYSTEM = (
-    "Eres asistente del juez de la Sala Penal de Apelaciones. Tu única tarea en "
+    "Eres asistente del juez de la Sala Superior Penal de Apelaciones. Tu única tarea en "
     "esta estación es resumir los HECHOS del caso de forma objetiva y neutral. "
     "NO opines, NO resuelvas, NO cites normas ni jurisprudencia. Solo narra qué "
     "ocurrió, qué pidió cada parte, qué decidió la primera instancia y qué se "
@@ -107,7 +107,7 @@ def node_resumen_hechos(state: CasoState) -> CasoState:
 # ── Estación 2: búsqueda de fundamentos (el RAG) ──────────────────────────
 
 _BUSQUEDA_SYSTEM = (
-    "Eres asistente del juez de la Sala Penal de Apelaciones. Tu tarea en esta "
+    "Eres asistente del juez de la Sala Superior Penal de Apelaciones. Tu tarea en esta "
     "estación es identificar los FUNDAMENTOS JURÍDICOS pertinentes al caso "
     "(normas y jurisprudencia), usando ÚNICAMENTE el material del almacén "
     "embebido abajo. No inventes artículos, casaciones ni acuerdos plenarios: "
@@ -153,12 +153,18 @@ def node_busqueda_fundamentos(state: CasoState) -> CasoState:
     # 3. Wiki consolidada del magistrado.
     wiki_txt = _leer_wiki_consolidada()
 
+    # 3b. Fichas individuales de jurisprudencia más afines (prefiltro léxico + re-rank Haiku).
+    #     Complementa el consolidado con las fichas sueltas más pertinentes al caso actual.
+    juris_fichas = _retrieve_jurisprudencia(state, k=6)
+
     # 4. Material disponible en el almacén.
     material: list[str] = []
     if articulos_txt.strip():
         material.append("## ARTÍCULOS DE CÓDIGOS APLICABLES (pre-filtrados)\n\n" + articulos_txt)
     if wiki_txt.strip():
         material.append("## ALMACÉN JURISPRUDENCIAL / CONCEPTUAL\n\n" + wiki_txt)
+    if juris_fichas.strip():
+        material.append(juris_fichas)
     if state.bibliografia:
         nombres = "\n".join(f"- {p.name}" for p in state.bibliografia)
         material.append("## BIBLIOGRAFÍA DE LA MATERIA (disponible para la redacción)\n\n" + nombres)
@@ -197,13 +203,74 @@ def node_busqueda_fundamentos(state: CasoState) -> CasoState:
         if fuentes_live:
             fuentes = fuentes + "\n\n" + fuentes_live
 
+    # 6. Casos previos del magistrado (corpus): las 5 fichas más afines como
+    #    ítems seleccionables. El juez decide en el checkpoint ② cuáles conservar.
+    previos = _retrieve_casos_previos(state, k=5)
+    if previos:
+        fuentes = fuentes + "\n\n" + previos
+
     state.fuentes = fuentes
     state.etapa = Etapa.CHECKPOINT_FUENTES
+    n_previos = previos.count("[CASO PREVIO")
+    n_juris   = juris_fichas.count("- **") if juris_fichas else 0
     state.avisos.append(
         f"Estación búsqueda: {len(state.bibliografia)} doc(s) de materia · modelo {modelo}"
         + (" · boletines en vivo incluidos" if fuentes_live else "")
+        + (f" · {n_juris} ficha(s) de jurisprudencia" if n_juris else "")
+        + (f" · {n_previos} caso(s) previo(s) propuesto(s)" if n_previos else "")
     )
     return state
+
+
+def _query_text(state: CasoState) -> str:
+    return f"{state.delito or ''} {state.materia_label or ''} {state.hechos_resumen or ''}"
+
+
+def _retrieve_casos_previos(state: CasoState, k: int = 5) -> str:
+    """Las fichas de casos previos del magistrado más afines, como viñetas seleccionables.
+
+    Ranking en dos pasos (prefiltro léxico + re-rank semántico con Haiku). Se incluyen
+    como referencia de estilo/criterio del juez, NO como precedente vinculante.
+    """
+    from app.artifex.retrieval import retrieve, one_line_summary
+    from app.core.file_manager import dir_casos_previos_wiki
+
+    try:
+        carpeta = dir_casos_previos_wiki(state.materia)
+    except Exception:
+        return ""
+    resultados = retrieve(carpeta, _query_text(state), k=k, prefilter=12)
+    if not resultados:
+        return ""
+    partes = [
+        "## (E) CASOS PREVIOS DEL MAGISTRADO — referencia de estilo y criterio "
+        "(seleccione cuáles aplicar; NO se citan como precedente vinculante)",
+    ]
+    for f, txt in resultados:
+        partes.append(f"• [CASO PREVIO] {f.stem.replace('_', ' ')} — {one_line_summary(txt)}")
+    return "\n".join(partes)
+
+
+def _retrieve_jurisprudencia(state: CasoState, k: int = 6) -> str:
+    """Fichas de jurisprudencia del magistrado más afines al caso (texto para E2).
+
+    Alimenta el material desde el que el modelo cura los fundamentos (B). Antes solo
+    se usaba el consolidado de ~6.5 KB; esto suma las fichas individuales pertinentes.
+    """
+    from app.artifex.retrieval import retrieve, one_line_summary
+    from app.core.file_manager import BASE_DIR
+
+    carpeta = BASE_DIR / "02_wiki" / "jurisprudencia"
+    resultados = retrieve(
+        carpeta, _query_text(state), k=k, prefilter=14,
+        exclude_names=("jurisprudencia.md",),  # el consolidado ya se incluye aparte
+    )
+    if not resultados:
+        return ""
+    partes = ["### FICHAS DE JURISPRUDENCIA PERTINENTES (almacén del magistrado)"]
+    for f, txt in resultados:
+        partes.append(f"- **{f.stem.replace('_', ' ')}**: {one_line_summary(txt, 700)}")
+    return "\n".join(partes)
 
 
 def _buscar_en_vivo(state: CasoState) -> str:
@@ -264,21 +331,37 @@ def _espina_aprobada(state: CasoState) -> str:
         "ESPINA APROBADA POR EL JUEZ (revisada en checkpoints ① hechos y ② fuentes)\n"
         f"{SEP}\n"
         "El magistrado ya revisó y aprobó el resumen de hechos y la lista de "
-        "fundamentos de abajo. Son el RUMBO de la redacción. El expediente crudo "
-        "(Bloque 4) y la bibliografía (Bloque 5) están para fidelidad literal y "
-        "respaldo; no contradigas la espina aprobada.\n\n"
-        "⚠️  ENCABEZADO INSTITUCIONAL — NO LO INCLUYAS EN EL BORRADOR\n"
-        "El sistema añade automáticamente al .docx los bloques:\n"
-        "  • PODER JUDICIAL\n"
-        "  • CORTE SUPERIOR DE JUSTICIA DE ICA\n"
-        "  • SALA PENAL DE APELACIONES DE CHINCHA Y PISCO\n"
-        "  • Bloque de metadatos (EXPEDIENTE Nº / IMPUTADO / DELITO / AGRAVIADO / PROCEDENCIA)\n"
-        "NO los repitas en el texto que generes — el exportador los pondría doble.\n"
-        "Comienza el borrador DIRECTAMENTE con la línea 'AUTO DE VISTA' o la numeración "
-        "de resolución (ej: 'RESOLUCIÓN Nº 05').\n"
-        "Si necesitas mencionar el órgano en el cuerpo del texto, usa los nombres exactos:\n"
-        "  Sala: SALA PENAL DE APELACIONES DE CHINCHA Y PISCO\n"
-        "  Corte: CORTE SUPERIOR DE JUSTICIA DE ICA\n\n"
+        "fundamentos de abajo. Son la GUÍA DE CONTENIDO — definen qué temas cubre "
+        "la resolución y cuál es la postura. NO son una guía de longitud: la "
+        "resolución debe ser TAN EXTENSA Y DETALLADA como la plantilla (Bloque 3). "
+        "El expediente crudo (Bloque 4) es la fuente principal para construir los "
+        "considerandos con toda la profundidad que el caso exige — cita folios, "
+        "transcribe declaraciones clave, analiza cada elemento de convicción en "
+        "párrafo propio. No contradigas la espina aprobada en su dirección, pero "
+        "SÍ expándela hasta alcanzar la riqueza jurídica de la plantilla.\n\n"
+        "📌 FORMATO Y ENCABEZADO — REPRODUCE LA PLANTILLA AL PIE DE LA LETRA\n"
+        "Esto es una RESOLUCIÓN JUDICIAL, no un borrador: su FORMA debe ser IDÉNTICA a "
+        "la de la plantilla (Bloque 3). El documento final se genera reproduciendo TU "
+        "texto tal cual — el sistema NO reformatea, NO filtra y NO agrega encabezados. "
+        "Todo lo que debe aparecer en el .docx debe estar en el texto que generes. Por tanto:\n"
+        "• INICIA el documento con el encabezado institucional EXACTO de la plantilla: "
+        "las líneas PODER JUDICIAL / CORTE SUPERIOR DE JUSTICIA DE ICA / el nombre de la "
+        "Sala TAL COMO APARECE EN LA PLANTILLA (no lo cambies ni lo abrevies), seguidas "
+        "del bloque de metadatos (EXPEDIENTE / IMPUTADO / DELITO / AGRAVIADO / MATERIA / "
+        "PROCEDENCIA) con los MISMOS rótulos, dos puntos y tabulaciones de la plantilla, "
+        "pero con los DATOS REALES de este caso.\n"
+        "• Reproduce los títulos de sección con la MISMA forma que la plantilla "
+        "(numeración romana, mayúsculas, y el punto final solo si la plantilla lo usa).\n"
+        "• Conserva los subtítulos en LÍNEA PROPIA (ej. «De la defensa técnica del "
+        "imputado») sin fusionarlos con el párrafo numerado siguiente.\n"
+        "• Mantén el mismo esquema de numeración de párrafos y las líneas en blanco "
+        "entre bloques que usa la plantilla.\n"
+        "• NO uses Markdown (nada de #, **, viñetas con guión). Devuelve TEXTO PLANO con "
+        "el formato visual de la plantilla.\n"
+        "• NOMBRE OFICIAL DE LA SALA: cuando menciones el órgano en el encabezado o en "
+        "el cuerpo, escríbelo SIEMPRE como «Sala Superior Penal de Apelaciones de Chincha "
+        "y Pisco» (NO «Sala Superior Penal de Apelaciones»). La Corte es «Corte Superior de "
+        "Justicia de Ica».\n\n"
         "## HECHOS APROBADOS\n\n"
         f"{(state.hechos_resumen or '(sin resumen)').strip()}\n\n"
         "## FUNDAMENTOS APROBADOS\n\n"
@@ -418,7 +501,7 @@ def node_verificacion(state: CasoState) -> CasoState:
 # ── Estación 5: pulido de lenguaje (opcional, Haiku) ─────────────────────
 
 _PULIDO_SYSTEM = (
-    "Eres revisor de estilo jurídico de una Sala Penal de Apelaciones peruana. "
+    "Eres revisor de estilo jurídico de una Sala Superior Penal de Apelaciones peruana. "
     "Tu única tarea es pulir el LENGUAJE del auto de vista que recibirás, sin "
     "cambiar NADA del fondo jurídico: ni la postura, ni las citas, ni los hechos, "
     "ni la decisión. Solo corrige: redundancias, frases inapropiadas para un acto "
@@ -429,11 +512,11 @@ _PULIDO_SYSTEM = (
 
 
 def node_pulido(state: CasoState) -> CasoState:
-    """Estación 5 — pulido de lenguaje con Haiku (rápido y barato).
+    """Estación 5 — pulido de lenguaje con Sonnet (fallback Opus).
 
     Estación OPCIONAL: si no hay borrador o si el juez decide saltarla,
-    simplemente pasa el texto sin modificar.  Llama a Claude Haiku en lugar
-    de Opus para mantener el coste bajo.
+    simplemente pasa el texto sin modificar.  Llama a Claude Sonnet en lugar
+    de Opus para mantener el coste más bajo sin comprometer el estilo.
     """
     borrador = (state.borrador or "").strip()
     if not borrador:
@@ -446,7 +529,7 @@ def node_pulido(state: CasoState) -> CasoState:
         "Devuelve SOLO el texto corregido:\n\n"
         f"{borrador}"
     )
-    # Haiku: rápido, barato, sin comprometer el fondo del acto
+    # Sonnet: equilibrio coste/calidad, sin comprometer el fondo del acto
     pulido, modelo = call_model(
         prompt,
         system=_PULIDO_SYSTEM,
@@ -462,7 +545,7 @@ def node_pulido(state: CasoState) -> CasoState:
 
 # ── Estación 6: formato / exportación .docx ───────────────────────────────
 
-_SALA_NOMBRE = "SALA PENAL DE APELACIONES DE CHINCHA Y PISCO"
+_SALA_NOMBRE = "SALA SUPERIOR PENAL DE APELACIONES DE CHINCHA Y PISCO"
 _CORTE_NOMBRE = "CORTE SUPERIOR DE JUSTICIA DE ICA"
 
 
@@ -486,22 +569,15 @@ def node_formato(state: CasoState) -> CasoState:
         state.etapa = Etapa.FINAL
         return state
 
-    meta = {
-        "expediente": state.expediente,
-        "imputado": state.imputados,
-        "delito": state.delito,
-        "agraviado": state.agraviado,
-        "procedencia": state.juzgado or "JUZGADO DE INVESTIGACION PREPARATORIA",
-        "corte": _CORTE_NOMBRE,
-        "sala": _SALA_NOMBRE,
-    }
-
     filename = resolution_docx_filename(state.materia, state.folder_name, state.expediente)
     out_dir = BASE_DIR / "outputs" / state.folder_name
     dest = out_dir / filename
 
+    # Renderizado FIEL: el modelo ya reprodujo el encabezado y el formato de la
+    # plantilla; el exportador NO reinyecta cabecera ni reformatea (eso causaba
+    # encabezados duplicados y "SALA PENAL" en vez de "SALA SUPERIOR PENAL").
     try:
-        markdown_to_docx(borrador, dest, metadata=meta)
+        text_to_docx_faithful(borrador, dest)
         state.documento_final = str(dest)
         state.etapa = Etapa.FINAL
         state.avisos.append(f"Estacion formato: .docx generado -> {dest.name}")
