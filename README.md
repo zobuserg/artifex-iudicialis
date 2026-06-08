@@ -1,7 +1,7 @@
 # Artifex Iudicialis — Fábrica de Resoluciones Judiciales
 
-Aplicación de escritorio (Windows, PyQt6) para la **Sala Penal de Apelaciones**.  
-Genera autos de vista y resoluciones en formato `.docx` oficial, con IA y control total del juez en cada paso.
+Aplicación de escritorio (Windows, PyQt6)  
+Genera resoluciones en formato `.docx` oficial, con IA y control total del usuario en cada paso.
 
 ---
 
