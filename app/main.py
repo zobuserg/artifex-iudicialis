@@ -16,6 +16,19 @@ from app.core.pdf_extract import bootstrap_tesseract
 load_repo_dotenv()
 bootstrap_tesseract()
 
+# ── LangSmith tracing (opcional) ─────────────────────────────────────────────
+# Si LANGSMITH_API_KEY está en .env, activa el tracing automático de LangGraph.
+# Cada corrida del grafo aparece en https://smith.langchain.com con tiempos,
+# inputs/outputs de cada nodo y errores. Sin la key, no hace nada.
+import os as _os
+if _os.environ.get("LANGSMITH_API_KEY", "").strip():
+    _os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    _os.environ.setdefault(
+        "LANGCHAIN_PROJECT",
+        _os.environ.get("LANGCHAIN_PROJECT", "adiutor-iudicis"),
+    )
+del _os
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication, QStyleFactory
