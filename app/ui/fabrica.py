@@ -56,6 +56,9 @@ from app.core.file_manager import (
     add_bibliografia,
     add_plantilla,
     add_to_case,
+    create_case_folder,
+    dir_bibliografia_materia,
+    get_next_case_number,
     list_bibliografia,
     list_case_folders,
     list_plantillas,
@@ -512,6 +515,262 @@ class _SlotCard(QWidget):
         self.files_changed.emit()
 
 
+# ── Diálogos de bibliografía ─────────────────────────────────────────────────
+
+class _NoteEditorDialog(QDialog):
+    """Editor de texto simple para crear o editar notas .md en la bibliografía."""
+
+    def __init__(self, titulo: str = "Nueva nota", texto: str = "",
+                 nombre_fijo: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(titulo)
+        self.resize(700, 500)
+        self.setStyleSheet(f"background: {_C['paper']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 14)
+        lay.setSpacing(10)
+
+        # Nombre del archivo (ocultable si es edición)
+        self._row_nombre = QWidget()
+        rn_lay = QHBoxLayout(self._row_nombre)
+        rn_lay.setContentsMargins(0, 0, 0, 0)
+        rn_lay.setSpacing(8)
+        rn_lay.addWidget(_lbl("Nombre:", size=12))
+        self._inp_nombre = QLineEdit()
+        self._inp_nombre.setPlaceholderText("ej: jurisprudencia_casacion_PP")
+        self._inp_nombre.setStyleSheet(_INPUT_SS)
+        if nombre_fijo:
+            self._inp_nombre.setText(nombre_fijo)
+            self._inp_nombre.setReadOnly(True)
+        rn_lay.addWidget(self._inp_nombre, 1)
+        rn_lay.addWidget(_lbl(".md", color=_C["faint"], size=11))
+        lay.addWidget(self._row_nombre)
+
+        # Editor de texto
+        self._txt = QPlainTextEdit()
+        self._txt.setPlainText(texto)
+        self._txt.setStyleSheet(
+            _INPUT_SS + "QPlainTextEdit { font-size: 12px; min-height: 280px; }"
+        )
+        lay.addWidget(self._txt, 1)
+
+        # Botones
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setStyleSheet(_BTN_GHOST)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_ok = QPushButton("💾  Guardar")
+        btn_ok.setStyleSheet(_BTN_PRIMARY)
+        btn_ok.clicked.connect(self.accept)
+        btn_row.addWidget(btn_ok)
+        lay.addLayout(btn_row)
+
+    def nombre(self) -> str:
+        return self._inp_nombre.text().strip()
+
+    def texto(self) -> str:
+        return self._txt.toPlainText()
+
+
+class _BibliografiaDialog(QDialog):
+    """Gestionar la bibliografía de una materia: ver, agregar, editar notas, eliminar."""
+
+    def __init__(self, materia: str, parent=None):
+        super().__init__(parent)
+        self._materia = materia
+        mat_label = MATERIA_LABELS.get(materia, materia)
+        self.setWindowTitle(f"Bibliografía · {mat_label}")
+        self.resize(760, 540)
+        self.setStyleSheet(f"background: {_C['paper']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 14)
+        lay.setSpacing(10)
+
+        # Encabezado
+        lay.addWidget(_lbl(f"Bibliografía adicional — {mat_label}", bold=True, size=15))
+        info = _lbl(
+            "Se incluye automáticamente en la redacción de todos los casos de esta materia. "
+            "Los archivos .md/.txt son editables directamente.",
+            color=_C["faint"], size=10,
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        # Lista con scroll
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {_C['hair']}; border-radius: 8px;"
+            f" background: {_C['card']}; }}"
+        )
+        self._list_widget = QWidget()
+        self._list_widget.setStyleSheet(f"background: {_C['card']};")
+        self._list_lay = QVBoxLayout(self._list_widget)
+        self._list_lay.setContentsMargins(10, 10, 10, 10)
+        self._list_lay.setSpacing(5)
+        scroll.setWidget(self._list_widget)
+        lay.addWidget(scroll, 1)
+
+        # Botones inferiores
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("➕  Agregar archivos…")
+        btn_add.setStyleSheet(_BTN_GHOST)
+        btn_add.clicked.connect(self._on_agregar)
+        btn_row.addWidget(btn_add)
+
+        btn_nota = QPushButton("📝  Nueva nota rápida…")
+        btn_nota.setStyleSheet(_BTN_GHOST)
+        btn_nota.clicked.connect(self._on_nueva_nota)
+        btn_row.addWidget(btn_nota)
+
+        btn_row.addStretch()
+
+        btn_cerrar = QPushButton("Cerrar")
+        btn_cerrar.setStyleSheet(_BTN_PRIMARY)
+        btn_cerrar.clicked.connect(self.accept)
+        btn_row.addWidget(btn_cerrar)
+        lay.addLayout(btn_row)
+
+        self._refresh()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _refresh(self):
+        """Reconstruye la lista de archivos."""
+        while self._list_lay.count():
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        try:
+            files = list_bibliografia(self._materia)
+        except Exception:
+            files = []
+
+        if not files:
+            lbl = _lbl(
+                "Sin archivos. Usa los botones de abajo para agregar bibliografía o crear una nota.",
+                color=_C["faint"], size=11,
+            )
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
+            self._list_lay.addWidget(lbl)
+            self._list_lay.addStretch()
+            return
+
+        for f in files:
+            row = QWidget()
+            row.setStyleSheet(
+                f"background: {_C['panel']}; border-radius: 6px;"
+                f" border: 1px solid {_C['hair']};"
+            )
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(10, 6, 8, 6)
+            rl.setSpacing(8)
+
+            is_text = f.suffix.lower() in (".md", ".txt")
+            icon = "📝" if is_text else "📄"
+            lbl_name = _lbl(f"{icon}  {f.name}", size=11)
+            lbl_name.setToolTip(str(f))
+            rl.addWidget(lbl_name, 1)
+
+            if is_text:
+                btn_edit = QPushButton("✏")
+                btn_edit.setToolTip("Editar contenido")
+                btn_edit.setFixedWidth(32)
+                btn_edit.setStyleSheet(_BTN_SMALL_GHOST)
+                btn_edit.clicked.connect(lambda _, path=f: self._on_editar(path))
+                rl.addWidget(btn_edit)
+
+            btn_del = QPushButton("🗑")
+            btn_del.setToolTip("Eliminar de la bibliografía")
+            btn_del.setFixedWidth(32)
+            btn_del.setStyleSheet(_BTN_SMALL_GHOST)
+            btn_del.clicked.connect(lambda _, path=f: self._on_eliminar(path))
+            rl.addWidget(btn_del)
+
+            self._list_lay.addWidget(row)
+
+        self._list_lay.addStretch()
+
+    # ── acciones ─────────────────────────────────────────────────────────────
+
+    def _on_agregar(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Agregar archivos a la bibliografía",
+            str(BASE_DIR / "01_raw"), qt_open_filter(),
+        )
+        n = 0
+        for p in paths:
+            try:
+                add_bibliografia(Path(p), materia=self._materia)
+                n += 1
+            except Exception:
+                pass
+        if n:
+            self._refresh()
+
+    def _on_nueva_nota(self):
+        dlg = _NoteEditorDialog("Nueva nota rápida", parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        texto = dlg.texto().strip()
+        if not texto:
+            QMessageBox.information(self, "Sin contenido", "La nota está vacía.")
+            return
+        nombre = dlg.nombre() or "nota_rapida"
+        if not nombre.endswith(".md"):
+            nombre += ".md"
+        nombre = nombre.replace(" ", "_")
+        dest_dir = dir_bibliografia_materia(self._materia)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / nombre
+        # Evitar sobreescritura silenciosa
+        i = 1
+        while dest.exists():
+            stem = Path(nombre).stem
+            dest = dest_dir / f"{stem}_{i}.md"
+            i += 1
+        try:
+            dest.write_text(texto, encoding="utf-8")
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Error al guardar", f"{e}")
+
+    def _on_editar(self, path: Path):
+        try:
+            texto = path.read_text(encoding="utf-8")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al leer", f"{e}")
+            return
+        dlg = _NoteEditorDialog(
+            f"Editar — {path.name}", texto=texto,
+            nombre_fijo=path.stem, parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            path.write_text(dlg.texto(), encoding="utf-8")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al guardar", f"{e}")
+
+    def _on_eliminar(self, path: Path):
+        resp = QMessageBox.question(
+            self, "Eliminar archivo",
+            f"¿Eliminar «{path.name}» de la bibliografía?\nEsta acción no se puede deshacer.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            path.unlink()
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Error al eliminar", f"{e}")
+
+
 # ── Pantalla 0: El caso ─────────────────────────────────────────────────────
 
 class _MetaWorker(QThread):
@@ -761,14 +1020,13 @@ class _SetupScreen(QWidget):
         bib_l = QVBoxLayout(bib_w)
         bib_l.setContentsMargins(0, 0, 0, 0)
         bib_l.setSpacing(4)
-        self._btn_add_bib = QPushButton("📚  Agregar bibliografía…")
+        self._btn_add_bib = QPushButton("📚  Gestionar bibliografía…")
         self._btn_add_bib.setStyleSheet(_BTN_GHOST)
         self._btn_add_bib.setToolTip(
-            "Sube PDF/Word/Markdown a la bibliografía de esta materia.\n"
-            "Se incluye automáticamente en la redacción (Bloque 5) de los casos de la materia.\n"
-            "Equivale a la 'bibliografía por caso' del app anterior."
+            "Ver, agregar, editar y eliminar archivos de la bibliografía de esta materia.\n"
+            "Se incluye automáticamente en la redacción (Bloque 5) de los casos de la materia."
         )
-        self._btn_add_bib.clicked.connect(self._on_add_bibliografia)
+        self._btn_add_bib.clicked.connect(self._on_gestionar_bibliografia)
         bib_l.addWidget(self._btn_add_bib)
         self._bib_lbl = _lbl("…", color=_C["faint"], size=10)
         self._bib_lbl.setWordWrap(True)
@@ -889,27 +1147,12 @@ class _SetupScreen(QWidget):
         else:
             self._bib_lbl.setText("Sin bibliografía adicional para esta materia.")
 
-    def _on_add_bibliografia(self):
+    def _on_gestionar_bibliografia(self):
         materia = self._current_materia_slug()
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Agregar bibliografía a la materia",
-            str(BASE_DIR / "01_raw"),
-            qt_open_filter(),
-        )
-        if not paths:
-            return
-        n = 0
-        for p in paths:
-            try:
-                add_bibliografia(Path(p), materia=materia)
-                n += 1
-            except Exception:
-                pass
+        dlg = _BibliografiaDialog(materia, parent=self)
+        dlg.exec()
+        # Refrescar el label de resumen al cerrar
         self._refresh_bibliografia()
-        if n:
-            self._btn_add_bib.setText(f"✓  {n} agregado(s) a la bibliografía")
-            QTimer.singleShot(2500, lambda: self._btn_add_bib.setText("📚  Agregar bibliografía…"))
 
     def _on_add_plantilla(self):
         """Sube una nueva plantilla para la materia y la selecciona en el selector."""
@@ -951,18 +1194,17 @@ class _SetupScreen(QWidget):
         materia = self._current_materia_slug()
         nombre, ok = QInputDialog.getText(
             self, "Nuevo caso",
-            "Nombre del caso (ej: caso_021_robo_agravado):",
+            "Nombre descriptivo del caso (ej: robo agravado):",
         )
         if not ok or not nombre.strip():
             return
-        nombre = nombre.strip().replace(" ", "_")
-        caso_dir = BASE_DIR / "01_raw" / materia / nombre / "fuentes"
         try:
-            caso_dir.mkdir(parents=True, exist_ok=True)
+            numero = get_next_case_number(materia)
+            caso_dir = create_case_folder(numero, nombre.strip(), materia)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"No se pudo crear el caso:\n{e}")
             return
-        self._refresh_casos(seleccionar=str(caso_dir.parent))
+        self._refresh_casos(seleccionar=str(caso_dir))
 
     # ── Autocompletado de datos del expediente ────────────────────────────
     def _autocompletar_reset(self, delay_ms: int = 4000):
