@@ -43,11 +43,23 @@ def load_fichas(
 
 
 def lexical_rank(
-    fichas: list[Path], query_text: str, *, top: int = 12,
+    fichas: list[Path],
+    query_text: str,
+    *,
+    top: int = 12,
+    boost_terms: tuple[str, ...] = (),
+    boost_weight: int = 10,
 ) -> list[tuple[int, Path, str]]:
-    """Mejores `top` fichas por solapamiento de palabras clave. (score, path, texto)."""
+    """Mejores `top` fichas por solapamiento de palabras clave. (score, path, texto).
+
+    ``boost_terms`` (p. ej. el delito del caso) pesan ``boost_weight`` cada uno: una
+    ficha del MISMO delito/tipo de hecho sube por encima de fichas que solo comparten
+    vocabulario genérico (reparación civil, pago, plazo…). Sin esto, casos de un delito
+    distinto pero con jerga económica similar (p. ej. OAF) desplazan a los pertinentes.
+    """
     q = _toks(query_text)
-    if not q:
+    boost = _toks(" ".join(boost_terms))
+    if not q and not boost:
         return []
     scored: list[tuple[int, Path, str]] = []
     for f in fichas:
@@ -55,7 +67,8 @@ def lexical_rank(
             txt = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        score = len(q & _toks(f.stem + " " + strip_meta(txt)[:2000]))
+        ftoks = _toks(f.stem + " " + strip_meta(txt)[:2000])
+        score = len(q & ftoks) + boost_weight * len(boost & ftoks)
         if score > 0:
             scored.append((score, f, txt))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -63,11 +76,17 @@ def lexical_rank(
 
 
 def haiku_rerank(
-    query_text: str, candidates: list[tuple[int, Path, str]], *, k: int = 5,
+    query_text: str,
+    candidates: list[tuple[int, Path, str]],
+    *,
+    k: int = 5,
+    focus: str = "",
 ) -> list[tuple[Path, str]]:
     """Re-ranking semántico con Haiku sobre los candidatos del prefiltro léxico.
 
-    Si Haiku falla o hay pocos candidatos, cae al orden léxico. Devuelve <=k (path, texto).
+    ``focus`` (p. ej. el delito) se le da a Haiku como criterio dominante: debe
+    priorizar documentos del MISMO delito/tipo de hecho. Si Haiku falla o hay pocos
+    candidatos, cae al orden léxico. Devuelve <=k (path, texto).
     """
     if len(candidates) <= k:
         return [(f, t) for _, f, t in candidates]
@@ -75,8 +94,16 @@ def haiku_rerank(
         from app.core.wiki_worker import _call_haiku, _get_client
 
         listado = "\n".join(f"{i}. {f.stem.replace('_', ' ')}" for i, (_, f, _) in enumerate(candidates))
+        foco_txt = (
+            f"DELITO / TIPO DE CASO ACTUAL (criterio PRINCIPAL de afinidad): {focus}\n"
+            "Prioriza documentos del MISMO delito o tipo de hecho; un documento de otro "
+            "delito NO es pertinente aunque comparta vocabulario (reparación civil, pago, "
+            "plazos).\n\n"
+            if focus else ""
+        )
         prompt = (
-            "CASO ACTUAL:\n" + (query_text or "")[:1500] + "\n\n"
+            foco_txt
+            + "CASO ACTUAL:\n" + (query_text or "")[:1500] + "\n\n"
             "DOCUMENTOS CANDIDATOS (índice. título):\n" + listado + "\n\n"
             f"Devuelve SOLO un arreglo JSON con los índices de los {k} documentos MÁS "
             "pertinentes al caso actual, del más al menos relevante. "
@@ -107,16 +134,22 @@ def retrieve(
     prefilter: int = 12,
     use_haiku: bool = True,
     exclude_names: tuple[str, ...] = (),
+    focus: str = "",
 ) -> list[tuple[Path, str]]:
-    """Pipeline completo: carga fichas → prefiltro léxico → re-rank Haiku → top k."""
+    """Pipeline completo: carga fichas → prefiltro léxico → re-rank Haiku → top k.
+
+    ``focus`` (p. ej. el delito del caso) prioriza fichas del mismo delito/tipo de
+    hecho, tanto en el prefiltro léxico (boost) como en el re-rank Haiku.
+    """
     fichas = load_fichas(directory, exclude_names=exclude_names)
     if not fichas:
         return []
-    cands = lexical_rank(fichas, query_text, top=max(prefilter, k))
+    boost = (focus,) if focus else ()
+    cands = lexical_rank(fichas, query_text, top=max(prefilter, k), boost_terms=boost)
     if not cands:
         return []
     if use_haiku:
-        return haiku_rerank(query_text, cands, k=k)
+        return haiku_rerank(query_text, cands, k=k, focus=focus)
     return [(f, t) for _, f, t in cands[:k]]
 
 

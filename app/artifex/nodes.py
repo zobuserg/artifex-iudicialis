@@ -44,20 +44,28 @@ _SLOTS_HECHOS: tuple[str, ...] = (
 )
 
 _RESUMEN_SYSTEM = (
-    "Eres asistente del juez de la Sala Superior Penal de Apelaciones. Tu única tarea en "
-    "esta estación es resumir los HECHOS del caso de forma objetiva y neutral. "
-    "NO opines, NO resuelvas, NO cites normas ni jurisprudencia. Solo narra qué "
-    "ocurrió, qué pidió cada parte, qué decidió la primera instancia y qué se "
-    "apela. " + system_injection_guard_es()
+    "Eres asistente del juez de la Sala Superior Penal de Apelaciones. Tu tarea en "
+    "esta estación es analizar los documentos del expediente y producir DOS secciones "
+    "bien diferenciadas. NO opines, NO resuelvas, NO cites normas ni jurisprudencia "
+    "que no estén literalmente en los documentos. Sé fiel y objetivo. "
+    + system_injection_guard_es()
 )
 
 _RESUMEN_INSTRUCCION = (
-    "A partir ÚNICAMENTE de los documentos embebidos abajo, redacta un resumen "
-    "de los hechos del caso. Estructura sugerida:\n"
-    "1. Qué solicitó la parte (requerimiento/solicitud inicial).\n"
-    "2. Qué decidió el juez de primera instancia (resolución apelada).\n"
-    "3. Qué se cuestiona en la apelación (recurso).\n\n"
-    "Sé fiel a los documentos. No agregues hechos que no estén ahí. "
+    "A partir ÚNICAMENTE de los documentos embebidos abajo, produce exactamente "
+    "dos secciones con los encabezados indicados:\n\n"
+    "## RESUMEN DE HECHOS\n"
+    "Narra de forma objetiva y neutral:\n"
+    "  1. Qué solicitó la parte (requerimiento/solicitud inicial).\n"
+    "  2. Qué decidió el juez de primera instancia (resolución apelada).\n"
+    "  3. Qué cuestiona la parte en su recurso de apelación.\n\n"
+    "## PROBLEMA JURÍDICO DEL RECURSO\n"
+    "Identifica con precisión los AGRAVIOS concretos que plantea el apelante: "
+    "qué puntos específicos de la resolución impugna, bajo qué argumentos jurídicos, "
+    "y qué pretende obtener con la apelación. Estos agravios son el núcleo del "
+    "problema jurídico que la Sala debe resolver. Si hay varios agravios, "
+    "enuméralos separadamente. Si el recurso no está disponible, indícalo.\n\n"
+    "Sé fiel a los documentos. No agregues hechos ni argumentos que no estén ahí. "
     "Si un dato no aparece, dilo explícitamente en lugar de inventarlo."
 )
 
@@ -98,10 +106,77 @@ def node_resumen_hechos(state: CasoState) -> CasoState:
     prompt = "\n\n".join(partes)
     texto, modelo = call_model(prompt, system=_RESUMEN_SYSTEM, max_tokens=4096)
 
-    state.hechos_resumen = texto
+    # Separar las dos secciones del output estructurado.
+    hechos_resumen, agravios = _split_resumen_agravios(texto)
+    state.hechos_resumen = hechos_resumen
+    if agravios and not state.agravios:   # no sobreescribir si el juez ya editó
+        state.agravios = agravios
+    # Parsear lista individual de agravios (siempre actualiza desde el texto actual)
+    state.agravios_list = _parse_agravios_list(state.agravios or agravios)
     state.etapa = Etapa.CHECKPOINT_HECHOS
     state.avisos.append(f"Estación resumen: {leidos} documento(s) leído(s) · modelo {modelo}")
     return state
+
+
+def _split_resumen_agravios(texto: str) -> tuple[str, str]:
+    """Divide el output estructurado de E1 en (hechos_resumen, agravios).
+
+    Busca el encabezado '## PROBLEMA JURÍDICO DEL RECURSO' para separar.
+    Si no lo encuentra, devuelve el texto completo como hechos y agravios vacío.
+    """
+    import re
+    patron = re.compile(
+        r"##\s*PROBLEMA\s+JUR[IÍ]DICO\s+DEL\s+RECURSO",
+        re.IGNORECASE,
+    )
+    m = patron.search(texto)
+    if not m:
+        return texto.strip(), ""
+    hechos = texto[:m.start()].strip()
+    # Quitar el encabezado "## RESUMEN DE HECHOS" si aparece al inicio
+    hechos = re.sub(r"^##\s*RESUMEN\s+DE\s+HECHOS\s*\n?", "", hechos, flags=re.IGNORECASE).strip()
+    agravios = texto[m.end():].strip()
+    return hechos, agravios
+
+
+def _parse_agravios_list(agravios_text: str) -> list[str]:
+    """Extrae la lista individual de agravios desde el texto de la sección de agravios.
+
+    Soporta: numeración (1. / 1) / a) / a.) / - / •), párrafos separados por línea en blanco.
+    Devuelve lista de strings; si no detecta estructura, devuelve el texto completo como un ítem.
+    """
+    import re
+
+    text = agravios_text.strip()
+    if not text:
+        return []
+
+    # Patrón: ítems que empiezan con número o letra seguido de . o ) o solo número,
+    # o con guión/bala, al inicio de línea.
+    patron_item = re.compile(
+        r"^(?:\d{1,2}[.)]\s+|[a-zA-Z][.)]\s+|\d{1,2}\s+[-–]\s+|[-•]\s+)",
+        re.MULTILINE,
+    )
+
+    items: list[str] = []
+    splits = list(patron_item.finditer(text))
+    if len(splits) >= 2:
+        for i, m in enumerate(splits):
+            start = m.start()
+            end = splits[i + 1].start() if i + 1 < len(splits) else len(text)
+            item = text[start:end].strip()
+            # Quitar el marcador inicial del ítem
+            item_body = patron_item.sub("", item, count=1).strip()
+            if item_body:
+                items.append(item_body)
+        return items
+
+    # Fallback: párrafos separados por línea en blanco
+    parrafos = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(parrafos) >= 2:
+        return parrafos
+
+    return [text]
 
 
 # ── Estación 2: búsqueda de fundamentos (el RAG) ──────────────────────────
@@ -178,15 +253,18 @@ def node_busqueda_fundamentos(state: CasoState) -> CasoState:
         state.etapa = Etapa.CHECKPOINT_FUENTES
         return state
 
+    agravios_txt = state.agravios.strip() if state.agravios.strip() else "(no especificados)"
     instruccion = (
-        "RESUMEN DE HECHOS DEL CASO:\n"
+        "PROBLEMA JURÍDICO DEL RECURSO (agravios del apelante):\n"
+        f"{agravios_txt}\n\n"
+        "RESUMEN DE HECHOS:\n"
         f"{state.hechos_resumen or '(sin resumen)'}\n\n"
         f"DELITO IMPUTADO: {state.delito or '(no especificado)'}\n\n"
-        "Con base en los hechos y SOLO en el material del almacén de abajo, "
+        "Con base en el PROBLEMA JURÍDICO y SOLO en el material del almacén de abajo, "
         "elabora una lista curada de FUNDAMENTOS JURÍDICOS pertinentes para "
-        "resolver esta apelación. Para cada fundamento indica:\n"
+        "resolver ESPECÍFICAMENTE los agravios planteados. Para cada fundamento indica:\n"
         "  • La norma o precedente (artículo, casación, acuerdo plenario).\n"
-        "  • Una línea de por qué aplica a ESTE caso.\n\n"
+        "  • Una línea de por qué aplica a ESTE agravio concreto.\n\n"
         "Agrupa en: (A) Normas aplicables, (B) Jurisprudencia/precedentes, "
         "(C) Conceptos pertinentes. Al final, si detectas un fundamento que el "
         "caso claramente exige pero que NO está en el material, anótalo bajo "
@@ -223,7 +301,14 @@ def node_busqueda_fundamentos(state: CasoState) -> CasoState:
 
 
 def _query_text(state: CasoState) -> str:
-    return f"{state.delito or ''} {state.materia_label or ''} {state.hechos_resumen or ''}"
+    """Texto de consulta para el RAG.
+
+    Usa los agravios como foco principal si están disponibles — son el problema
+    jurídico concreto que la Sala debe resolver y determinan qué jurisprudencia
+    es realmente relevante. Si no hay agravios, cae a los hechos generales.
+    """
+    base = state.agravios.strip() if state.agravios.strip() else (state.hechos_resumen or "")
+    return f"{state.delito or ''} {state.materia_label or ''} {base}"
 
 
 def _retrieve_casos_previos(state: CasoState, k: int = 5) -> str:
@@ -239,7 +324,9 @@ def _retrieve_casos_previos(state: CasoState, k: int = 5) -> str:
         carpeta = dir_casos_previos_wiki(state.materia)
     except Exception:
         return ""
-    resultados = retrieve(carpeta, _query_text(state), k=k, prefilter=12)
+    resultados = retrieve(
+        carpeta, _query_text(state), k=k, prefilter=12, focus=state.delito,
+    )
     if not resultados:
         return ""
     partes = [
@@ -264,6 +351,7 @@ def _retrieve_jurisprudencia(state: CasoState, k: int = 6) -> str:
     resultados = retrieve(
         carpeta, _query_text(state), k=k, prefilter=14,
         exclude_names=("jurisprudencia.md",),  # el consolidado ya se incluye aparte
+        focus=state.delito,
     )
     if not resultados:
         return ""
@@ -273,12 +361,53 @@ def _retrieve_jurisprudencia(state: CasoState, k: int = 6) -> str:
     return "\n".join(partes)
 
 
-def _buscar_en_vivo(state: CasoState) -> str:
-    """Busca jurisprudencia reciente en páginas oficiales vía Tavily.
+def destilar_terminos_busqueda(contexto: str) -> str:
+    """Extrae con Haiku las PALABRAS CLAVE / conceptos jurídicos del caso para una
+    búsqueda web útil. Devuelve una sola línea de términos (sin nombres propios,
+    fechas ni datos del expediente). Si falla, devuelve un recorte del contexto.
 
-    Solo se ejecuta si state.use_live_web=True. Busca en dominios de confianza
-    (LP Derecho, Gaceta Jurídica, SPIJ, Diálogo con la Jurisprudencia).
-    Devuelve texto con cada resultado etiquetado como [EN VIVO].
+    Costo: una llamada a Haiku (~1 s, fracción de centavo). Necesario porque copiar
+    el texto del caso da búsquedas pobres; las keywords destiladas dan resultados
+    relacionados con la proposición jurídica.
+    """
+    contexto = (contexto or "").strip()
+    if not contexto:
+        return ""
+    system = (
+        "Eres un asistente jurídico peruano. Del contexto de un caso penal, extrae "
+        "las PALABRAS CLAVE y CONCEPTOS JURÍDICOS centrales para buscar jurisprudencia "
+        "y doctrina relacionada. Devuelve SOLO una línea con 4 a 8 términos o conceptos "
+        "jurídicos separados por espacios (p. ej. 'atentado libertad de trabajo dolo "
+        "libertad sindical reposición'). NO incluyas nombres de personas, fechas, "
+        "números de expediente ni montos. Sin explicaciones, solo los términos."
+    )
+    try:
+        out, _ = call_model(
+            contexto[:2000], system=system, max_tokens=120,
+            models=("claude-haiku-4-5-20251001",),
+        )
+        out = " ".join(out.split())
+        return out[:200]
+    except Exception:
+        return ""
+
+
+def buscar_web_juridica(
+    tema: str,
+    *,
+    max_por_tipo: int = 4,
+    profundidad: str = "advanced",
+    restringir_dominios: bool = False,
+) -> str:
+    """Búsqueda web jurídica verificable vía Tavily, lista para el checkpoint ②.
+
+    Hace dos búsquedas:
+      • Jurisprudencia: casaciones, acuerdos plenarios, sentencias del TC y Corte Suprema.
+      • Doctrina: artículos y libros jurídicos, con sus párrafos pertinentes.
+    Por defecto busca en TODA la web (más resultados); los dominios de confianza se
+    aplican solo si ``restringir_dominios=True``. Cada resultado es un ítem
+    SELECCIONABLE (viñeta `•`) con extracto y URL verificable, para que el juez revise
+    y escoja cuáles entran. Devuelve '' si no hay resultados.
     """
     import os
     try:
@@ -290,33 +419,64 @@ def _buscar_en_vivo(state: CasoState) -> str:
     if not api_key:
         return "[EN VIVO] Error: TAVILY_API_KEY no configurada en .env"
 
+    tema = (tema or "").strip() or "derecho penal"
+    dominios = [
+        "lpderecho.pe",
+        "gacetajuridica.com.pe",
+        "spij.minjus.gob.pe",
+        "dialogoconlajurisprudencia.com",
+        "pj.gob.pe",
+        "tc.gob.pe",
+    ]
+    busquedas = [
+        ("Jurisprudencia",
+         f"jurisprudencia {tema} Perú casación acuerdo plenario sentencia "
+         "Corte Suprema Tribunal Constitucional"),
+        ("Doctrina/Libros",
+         f"doctrina artículo jurídico libro {tema} Perú análisis comentario "
+         "penal presupuestos requisitos interpretación"),
+    ]
+
     try:
         client = TavilyClient(api_key=api_key)
-        query = (
-            f"jurisprudencia {state.delito or state.materia} Peru "
-            "casacion acuerdo plenario Corte Suprema 2024 2025 2026"
-        )
-        results = client.search(
-            query=query,
-            search_depth="basic",
-            max_results=4,
-            include_domains=[
-                "lpderecho.pe",
-                "gacetajuridica.com.pe",
-                "spij.minjus.gob.pe",
-                "dialogoconlajurisprudencia.com",
-                "pj.gob.pe",
-            ],
-        )
-        partes: list[str] = ["## (D) BOLETINES EN VIVO — fuentes recuperadas hoy\n"]
-        for r in results.get("results", []):
-            title = r.get("title", "Sin título")
-            url = r.get("url", "")
-            content = (r.get("content") or "")[:400]
-            partes.append(f"[EN VIVO] {title}\nFuente: {url}\n{content}\n")
-        return "\n".join(partes)
+        partes: list[str] = [
+            "## (D) BÚSQUEDA WEB — jurisprudencia y doctrina (verificable; "
+            "marque las que desee usar; NO se citan sin su revisión)"
+        ]
+        vistos: set[str] = set()
+        for etiqueta, query in busquedas:
+            try:
+                kwargs = dict(
+                    query=query, search_depth=profundidad, max_results=max_por_tipo,
+                )
+                if restringir_dominios:
+                    kwargs["include_domains"] = dominios
+                results = client.search(**kwargs)
+            except Exception as exc:
+                partes.append(f"• [EN VIVO · {etiqueta}] Error en la búsqueda: {exc}")
+                continue
+            for r in results.get("results", []):
+                url = (r.get("url") or "").strip()
+                if not url or url in vistos:
+                    continue
+                vistos.add(url)
+                title = (r.get("title") or "Sin título").strip()
+                # Extracto más largo: el párrafo pertinente del artículo/sentencia.
+                content = " ".join((r.get("content") or "").split())[:1100]
+                partes.append(
+                    f"• [EN VIVO · {etiqueta}] {title} — {content} Fuente: {url}"
+                )
+        if len(partes) == 1:
+            return ""   # sin resultados: no añadir una sección vacía
+        return "\n\n".join(partes)
     except Exception as exc:
         return f"[EN VIVO] Error en búsqueda web: {exc}"
+
+
+def _buscar_en_vivo(state: CasoState) -> str:
+    """Búsqueda en vivo durante E2 (si state.use_live_web=True). Deriva el tema del caso."""
+    tema = f"{state.delito or ''} {state.materia_label or ''} {(state.agravios or '')[:300]}".strip()
+    return buscar_web_juridica(tema, max_por_tipo=3, profundidad="basic")
 
 
 # ── Estación 3: redacción de la resolución ────────────────────────────────
@@ -326,6 +486,31 @@ SEP = "═" * 55
 
 def _espina_aprobada(state: CasoState) -> str:
     """Bloque rector con lo que el juez ya revisó en los checkpoints ① y ②."""
+
+    # Bloque de agravios: parsear fresco desde state.agravios (captura ediciones del juez).
+    agravios_list_fresh = _parse_agravios_list(state.agravios) if state.agravios.strip() else state.agravios_list
+    agravios_list = agravios_list_fresh if len(agravios_list_fresh) >= 2 else []
+    if agravios_list:
+        agravios_bloque = (
+            "## AGRAVIOS A RESOLVER — REGLA DE PROFUNDIDAD POR AGRAVIO\n\n"
+            f"El recurso plantea {len(agravios_list)} agravio(s) independientes. "
+            "La resolución DEBE contener un BLOQUE DE CONSIDERANDOS DEDICADO Y COMPLETO "
+            "para CADA agravio numerado abajo. Cada bloque debe cubrir como mínimo:\n"
+            "  1. El agravio planteado (parafraseado en lenguaje judicial).\n"
+            "  2. La norma o estándar jurisprudencial aplicable.\n"
+            "  3. La valoración del caso concreto frente a ese estándar.\n"
+            "  4. La conclusión para ese agravio (fundado / infundado / parcialmente fundado).\n"
+            "NO fundir ni resumir agravios distintos en un mismo bloque. "
+            "Un agravio desatendido es causal de nulidad.\n\n"
+        )
+        for i, agr in enumerate(agravios_list, 1):
+            agravios_bloque += f"AGRAVIO {i} (desarrollar en su propio bloque de considerandos):\n{agr}\n\n"
+    else:
+        agravios_bloque = (
+            "## AGRAVIOS DEL APELANTE\n\n"
+            f"{(state.agravios or '(no especificados)').strip()}\n\n"
+        )
+
     return (
         f"{SEP}\n"
         "ESPINA APROBADA POR EL JUEZ (revisada en checkpoints ① hechos y ② fuentes)\n"
@@ -351,7 +536,7 @@ def _espina_aprobada(state: CasoState) -> str:
         "PROCEDENCIA) con los MISMOS rótulos, dos puntos y tabulaciones de la plantilla, "
         "pero con los DATOS REALES de este caso.\n"
         "• Reproduce los títulos de sección con la MISMA forma que la plantilla "
-        "(numeración romana, mayúsculas, y el punto final solo si la plantilla lo usa).\n"
+        "(numeración romana, mayúsculas, y el punto final solo si la plantilla lo uso).\n"
         "• Conserva los subtítulos en LÍNEA PROPIA (ej. «De la defensa técnica del "
         "imputado») sin fusionarlos con el párrafo numerado siguiente.\n"
         "• Mantén el mismo esquema de numeración de párrafos y las líneas en blanco "
@@ -364,7 +549,8 @@ def _espina_aprobada(state: CasoState) -> str:
         "Justicia de Ica».\n\n"
         "## HECHOS APROBADOS\n\n"
         f"{(state.hechos_resumen or '(sin resumen)').strip()}\n\n"
-        "## FUNDAMENTOS APROBADOS\n\n"
+        + agravios_bloque
+        + "## FUNDAMENTOS APROBADOS\n\n"
         f"{(state.fuentes or '(sin fundamentos)').strip()}\n"
     )
 
@@ -412,6 +598,7 @@ def _prompt_kwargs_from_state(state: CasoState) -> dict:
         "folder_name": state.folder_name,
         "caso_num": state.caso_num,
         "tipo": state.tipo or "resolución de vista",
+        "resoluciones_estilo": state.resoluciones_estilo,
     }
 
 

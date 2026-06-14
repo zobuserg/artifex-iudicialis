@@ -79,7 +79,13 @@ class CasoState(BaseModel):
     postura: Postura = Field(default=Postura.CONFIRMAR)
     postura_personalizada: str = Field(default="")
     agravios: str = Field(default="", description="Agravios; si vacío, se extraen del recurso")
+    agravios_list: list[str] = Field(default_factory=list, description="Agravios parseados en lista (uno por ítem)")
     instruccion_particular: str = Field(default="", description="Nota del juez para este caso")
+    # Hasta 3 resoluciones del magistrado como referencia de ESTILO (no contenido jurídico).
+    resoluciones_estilo: list[Path] = Field(
+        default_factory=list,
+        description="Resoluciones propias del juez para guiar el tono y estilo de redacción",
+    )
 
     # ── Metadatos del encabezado (dorado) ─────────────────────────────────
     expediente: str = Field(default="")

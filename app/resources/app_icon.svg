@@ -1,0 +1,45 @@
+<svg width="1024" height="1024" viewBox="0 0 680 680" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Adiutor Iudicis.2 — balanza de la justicia y pluma</title>
+<desc>Balanza de la justicia en sepia sobre fondo dorado, con una pluma de escribir como mástil central.</desc>
+<defs>
+<linearGradient id="oro" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#f3d88e"/>
+<stop offset="1" stop-color="#c89a39"/>
+</linearGradient>
+<linearGradient id="marfil" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#fdf7e6"/>
+<stop offset="1" stop-color="#efe0bd"/>
+</linearGradient>
+</defs>
+
+<rect x="64" y="64" width="552" height="552" rx="128" fill="url(#oro)" stroke="#b5862c" stroke-width="4"/>
+
+<g stroke="#473719" stroke-width="11" stroke-linecap="round" fill="none">
+<line x1="170" y1="330" x2="510" y2="330"/>
+<line x1="170" y1="330" x2="122" y2="442"/>
+<line x1="170" y1="330" x2="218" y2="442"/>
+<line x1="510" y1="330" x2="462" y2="442"/>
+<line x1="510" y1="330" x2="558" y2="442"/>
+</g>
+<path d="M110 442 A60 60 0 0 0 230 442" fill="none" stroke="#473719" stroke-width="12" stroke-linecap="round"/>
+<path d="M450 442 A60 60 0 0 0 570 442" fill="none" stroke="#473719" stroke-width="12" stroke-linecap="round"/>
+
+<line x1="338" y1="300" x2="335" y2="556" stroke="#473719" stroke-width="9" stroke-linecap="round"/>
+<polygon points="335,576 327,552 345,552" fill="#473719"/>
+<path d="M300 580 Q340 566 380 580 L372 556 L308 556 Z" fill="#473719"/>
+
+<path d="M340 150 C296 206 286 270 320 326 L340 306 L360 326 C394 270 384 206 340 150 Z" fill="url(#marfil)" stroke="#7a5d23" stroke-width="6" stroke-linejoin="round"/>
+<line x1="340" y1="160" x2="340" y2="312" stroke="#7a5d23" stroke-width="5" stroke-linecap="round"/>
+<g stroke="#9a7a33" stroke-width="3" stroke-linecap="round">
+<line x1="340" y1="196" x2="316" y2="186"/>
+<line x1="340" y1="196" x2="364" y2="186"/>
+<line x1="340" y1="226" x2="312" y2="216"/>
+<line x1="340" y1="226" x2="368" y2="216"/>
+<line x1="340" y1="256" x2="312" y2="248"/>
+<line x1="340" y1="256" x2="368" y2="248"/>
+<line x1="340" y1="286" x2="316" y2="280"/>
+<line x1="340" y1="286" x2="364" y2="280"/>
+</g>
+
+<circle cx="340" cy="330" r="13" fill="#473719"/>
+</svg>

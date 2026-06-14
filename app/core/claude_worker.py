@@ -793,6 +793,7 @@ def build_enriched_prompt(
     folder_name: str,
     caso_num: str,
     tipo: str,
+    resoluciones_estilo: list[Path] | None = None,
     warnings_out: list[str] | None = None,
 ) -> str:
     """Arma el prompt con el contenido de los archivos embebido."""
@@ -849,6 +850,32 @@ def build_enriched_prompt(
             "son los del expediente en el Bloque 4.\n\n"
             f"{pla_text}\n"
         )
+
+    # ── BLOQUE 3B: Resoluciones de referencia de estilo (corpus del magistrado) ─
+    estilo_paths = [p for p in (resoluciones_estilo or []) if p and Path(p).is_file()]
+    if estilo_paths:
+        partes_estilo: list[str] = [
+            f"{SEP}\n"
+            "BLOQUE 3B · ESTILO DEL MAGISTRADO (referencia de redacción)\n"
+            f"{SEP}\n"
+            "Las siguientes resoluciones del propio magistrado se incluyen EXCLUSIVAMENTE "
+            "como referencia de ESTILO DE REDACCIÓN: vocabulario, estructura de considerandos, "
+            "forma de citar jurisprudencia, nivel de detalle y tono. "
+            "NO uses los hechos, datos de partes ni decisiones de estas resoluciones en el caso "
+            "que estás redactando — son del todo distintos. Solo imita el estilo.\n"
+        ]
+        for i, p in enumerate(estilo_paths[:3], 1):
+            try:
+                contenido = read_file_text(Path(p))
+                partes_estilo.append(
+                    f"--- RESOLUCIÓN DE REFERENCIA {i} · {Path(p).name} ---\n"
+                    f"{contenido}\n"
+                    f"--- FIN RESOLUCIÓN {i} ---\n"
+                )
+            except Exception:
+                pass
+        if len(partes_estilo) > 1:   # solo si al menos una se leyó
+            blocks.append("\n\n".join(partes_estilo))
 
     # ── BLOQUE 4: Fuentes del expediente (contenido embebido) ─────────────
     has_slots = any(v for v in slots.values())
