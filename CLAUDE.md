@@ -8,6 +8,43 @@ El cliente es un juez. El sistema automatiza la redacción de autos de vista
 usando un pipeline LangGraph con tres puntos de control donde el juez aprueba
 o corrige antes de continuar.
 
+## ⚠️ LEER PRIMERO — UI viva y protocolo de cambios
+
+El usuario es **un juez sin experiencia en programación** que trabaja por
+vibecoding. Si no se siguen estas dos secciones, los cambios "fallan en
+silencio": se aplican pero el juez nunca los ve, y concluye que no funcionaron.
+
+### UI VIVA — dónde tocar
+
+- **La interfaz que el juez ve al correr la app es `app/ui/fabrica.py`.**
+  TODO cambio visual o de flujo va AHÍ.
+- `app/ui/main_window.py` y `app/ui/artifex_page.py` son **rutas de UI antiguas**
+  que siguen en el repo por compatibilidad. **Editarlas NO cambia nada en la app
+  que corre el juez.** Excepción: `WikiConsultaPage` (chat del wiki) vive en
+  `main_window.py` y se reutiliza desde `fabrica.py`.
+- Si no estás 100% seguro de qué pantalla/elemento se refiere el juez,
+  **pide una captura** antes de tocar. No adivines.
+
+### Protocolo de vibecoding (obligatorio en cada cambio)
+
+1. **Confirmar el qué.** Reformular el pedido en una frase, en lenguaje llano,
+   antes de editar.
+2. **Localizar antes de tocar.** Leer el código real (grep + Read). Identificar
+   el archivo correcto (casi siempre `fabrica.py`).
+3. **Cambio quirúrgico.** Tocar lo mínimo. No mezclar refactors con el arreglo.
+4. **Verificar SIEMPRE.** `py_compile` como mínimo; correr la app si aplica.
+   Nunca decir "hecho" sin haber verificado.
+5. **Decir cómo verlo.** Indicar al juez: "cierra y reabre la app (no hay recarga
+   en caliente) y ve a tal pantalla". El juez no lee código: la confirmación
+   visual es su única forma de validar.
+6. **Separar diagnosticar de arreglar.** Si algo falla, primero diagnosticar;
+   no encadenar parches a ciegas. Si un bug se resiste, empezar conversación
+   nueva (el contexto se degrada).
+
+> Estas reglas están alineadas con los principios de Karpathy para CLAUDE.md
+> (pensar antes de codear · simplicidad · cambios quirúrgicos · ejecución
+> verificada) y con las prácticas anti «doom loop» del vibecoding.
+
 ## Cómo correr la app
 
 ```powershell
