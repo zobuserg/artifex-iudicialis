@@ -1,5 +1,13 @@
 # Artifex Iudicialis — Contexto para Claude Code
 
+> ## ⛔ PROYECTO CONGELADO (2026-06-28, decisión del juez)
+>
+> **NO desarrollar aquí.** La app viva es **Adiutor Iudicis 1 / WikiJuez**:
+> `/Users/dagumar/Proyectos/OBSIDIAN/WikiJuridico`, rama `v2`.
+> Este repo se conserva solo como referencia histórica. Si el juez pide un
+> cambio "en Adiutor" o "en la app", se refiere a WikiJuez, no a esto.
+> Ante cualquier duda, preguntar antes de tocar.
+
 ## Qué es esto
 
 App de escritorio (PyQt6, Windows) que genera resoluciones judiciales para la
